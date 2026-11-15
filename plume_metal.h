@@ -88,46 +88,48 @@ namespace plume {
     };
 
     struct ComputeStateFlags {
-        uint32_t pipelineState : 1;
-        uint32_t descriptorSets : 1;
-        uint32_t pushConstants : 1;
+        union {
+            struct {
+                uint32_t pipelineState : 1;
+                uint32_t descriptorSets : 1;
+                uint32_t pushConstants : 1;
+            };
+            uint32_t value;
+        };
 
-        // marks from which descriptor set we'll invalidate from
-        uint32_t descriptorSetDirtyIndex : 5;
+        // Marks from which descriptor set we'll invalidate from
+        uint32_t descriptorSetDirtyIndex;
 
         void setAll() {
-            pipelineState = 1;
-            descriptorSets = 1;
-            pushConstants = 1;
-
+            value = 0x7; // All 3 bits set
             descriptorSetDirtyIndex = 0;
         }
     };
 
     struct GraphicsStateFlags {
-        uint32_t pipelineState : 1;
-        uint32_t descriptorSets : 1;
-        uint32_t pushConstants : 1;
-        uint32_t viewports : 1;
-        uint32_t scissors : 1;
-        uint32_t indexBuffer : 1;
-        uint32_t depthBias : 1;
+        union {
+            struct {
+                uint32_t pipelineState : 1;
+                uint32_t descriptorSets : 1;
+                uint32_t pushConstants : 1;
+                uint32_t viewports : 1;
+                uint32_t scissors : 1;
+                uint32_t indexBuffer : 1;
+                uint32_t depthBias : 1;
+                uint32_t depthStencil : 1;
+                uint32_t rasterizer : 1;
+            };
+            uint32_t value;
+        };
 
-        // marks from which descriptor set we'll invalidate from
-        uint32_t descriptorSetDirtyIndex : 5;
+        // Marks from which descriptor set we'll invalidate from
+        uint32_t descriptorSetDirtyIndex;
 
-        // Specific dirty vertex buffer slots
-        uint32_t vertexBufferSlots : 19;
+        // Specific dirty vertex buffer slots (bitmask)
+        uint32_t vertexBufferSlots;
 
         void setAll() {
-            pipelineState = 1;
-            descriptorSets = 1;
-            pushConstants = 1;
-            viewports = 1;
-            scissors = 1;
-            indexBuffer = 1;
-            depthBias = 1;
-
+            value = 0x1FF; // All 9 bits set
             descriptorSetDirtyIndex = 0;
             vertexBufferSlots = (1U << MAX_VERTEX_BUFFER_BINDINGS) - 1;
         }
@@ -199,6 +201,7 @@ namespace plume {
 
     struct ExtendedRenderTexture : RenderTexture {
         RenderTextureDesc desc;
+        RenderBarrierStages barrierStages = RenderBarrierStage::NONE;
         virtual MTL::Texture* getTexture() const = 0;
     };
 
@@ -213,7 +216,6 @@ namespace plume {
         std::vector<Descriptor> descriptors;
         MetalArgumentBuffer argumentBuffer;
         std::vector<ResourceEntry> resourceEntries;
-        std::vector<MTL::Resource *> toReleaseOnDestruction;
 
         MetalDescriptorSet(MetalDevice *device, const RenderDescriptorSetDesc &desc);
         MetalDescriptorSet(MetalDevice *device, uint32_t entryCount);
@@ -228,18 +230,23 @@ namespace plume {
     };
 
     struct MetalSwapChain : RenderSwapChain {
+        RenderSwapChainDesc desc;
         CA::MetalLayer *layer = nullptr;
         MetalCommandQueue *commandQueue = nullptr;
-        RenderFormat format = RenderFormat::UNKNOWN;
         uint32_t width = 0;
         uint32_t height = 0;
         uint32_t refreshRate = 0;
         std::vector<MetalDrawable> drawables;
         uint32_t currentAvailableDrawableIndex = 0;
-        RenderWindow renderWindow = {};
         std::unique_ptr<CocoaWindow> windowWrapper;
 
-        MetalSwapChain(MetalCommandQueue *commandQueue, RenderWindow renderWindow, uint32_t textureCount, RenderFormat format);
+        // Present wait
+        uint64_t currentPresentId = 0;
+        uint64_t lastPresentedId = 0;
+        std::mutex lastPresentedIdMutex;
+        std::condition_variable lastPresentedIdCondVar;
+
+        MetalSwapChain(MetalCommandQueue *commandQueue, const RenderSwapChainDesc &desc);
         ~MetalSwapChain() override;
         bool present(uint32_t textureIndex, RenderCommandSemaphore **waitSemaphores, uint32_t waitSemaphoreCount) override;
         void wait() override;
@@ -279,6 +286,7 @@ namespace plume {
 
         MTL::SamplePosition samplePositions[16] = {};
         uint32_t sampleCount = 0;
+        bool samplePositionsEnabled = false;
 
         MetalFramebuffer(const MetalDevice *device, const RenderFramebufferDesc &desc);
         ~MetalFramebuffer() override;
@@ -288,6 +296,7 @@ namespace plume {
 
     struct MetalQueryPool : RenderQueryPool {
         MetalDevice *device = nullptr;
+        MTL::CounterSampleBuffer *sampleBuffer = nullptr;
         std::vector<uint64_t> results;
 
         MetalQueryPool(MetalDevice *device, uint32_t queryCount);
@@ -296,6 +305,27 @@ namespace plume {
         virtual const uint64_t *getResults() const override;
         virtual uint32_t getCount() const override;
     };
+
+    enum MetalBarrierStage {
+        GRAPHICS = 0,
+        COMPUTE,
+        COPY,
+        COUNT
+    };
+
+    static std::string MetalBarrierStageName(MetalBarrierStage stage) {
+        switch (stage) {
+            case MetalBarrierStage::GRAPHICS:
+                return "Graphics";
+            case MetalBarrierStage::COMPUTE:
+                return "Compute";
+            case MetalBarrierStage::COPY:
+                return "Copy";
+            default:
+                assert(false);
+                return "Unknown";
+        }
+    }
 
     struct MetalCommandList : RenderCommandList {
         union ClearValue {
@@ -321,6 +351,7 @@ namespace plume {
 
         MTL::CommandBuffer *mtl = nullptr;
         EncoderType activeType = EncoderType::None;
+        bool startedEncoding = false;
         MTL::RenderCommandEncoder *activeRenderEncoder = nullptr;
         MTL::ComputeCommandEncoder *activeComputeEncoder = nullptr;
         MTL::BlitCommandEncoder *activeBlitEncoder = nullptr;
@@ -335,11 +366,48 @@ namespace plume {
             bool active = false;
         } pendingClears;
 
-        struct {
+        // State cache to track last-bound values and avoid redundant encoder calls
+        struct StateCache {
+            // Pipeline state
             MTL::RenderPipelineState* lastPipelineState = nullptr;
+            MTL::ComputePipelineState* lastComputePipelineState = nullptr;
+
+            // Depth/stencil state
+            MTL::DepthStencilState* lastDepthStencilState = nullptr;
+            uint32_t lastStencilReference = 0;
+
+            // Rasterizer state
+            MTL::CullMode lastCullMode = MTL::CullModeNone;
+            MTL::Winding lastWinding = MTL::WindingClockwise;
+            MTL::DepthClipMode lastDepthClipMode = MTL::DepthClipModeClip;
+
+            // Depth bias
+            float lastDepthBias = 0.0f;
+            float lastDepthBiasClamp = 0.0f;
+            float lastSlopeScaledDepthBias = 0.0f;
+
+            // Viewport/scissor
             std::vector<MTL::Viewport> lastViewports;
             std::vector<MTL::ScissorRect> lastScissors;
+
+            // Push constants
             std::vector<PushConstantData> lastPushConstants;
+
+            void reset() {
+                lastPipelineState = nullptr;
+                lastComputePipelineState = nullptr;
+                lastDepthStencilState = nullptr;
+                lastStencilReference = 0;
+                lastCullMode = MTL::CullModeNone;
+                lastWinding = MTL::WindingClockwise;
+                lastDepthClipMode = MTL::DepthClipModeClip;
+                lastDepthBias = 0.0f;
+                lastDepthBiasClamp = 0.0f;
+                lastSlopeScaledDepthBias = 0.0f;
+                lastViewports.clear();
+                lastScissors.clear();
+                lastPushConstants.clear();
+            }
         } stateCache;
 
         MTL::PrimitiveType currentPrimitiveType = MTL::PrimitiveTypeTriangle;
@@ -360,6 +428,13 @@ namespace plume {
             float slopeScaledDepthBias;
         } dynamicDepthBias;
 
+        struct {
+            uint32_t updateDirtyBits = ~0;
+            int update[MetalBarrierStage::COUNT] = {};
+            int wait[MetalBarrierStage::COUNT][MetalBarrierStage::COUNT] = {};
+        } fenceSlots;
+        std::vector<MTL::Fence*> fences[MetalBarrierStage::COUNT] = {};
+
         MetalDevice *device = nullptr;
         const MetalCommandQueue *queue = nullptr;
         const MetalFramebuffer *targetFramebuffer = nullptr;
@@ -367,8 +442,10 @@ namespace plume {
         const MetalPipelineLayout *activeGraphicsPipelineLayout = nullptr;
         const MetalRenderState *activeRenderState = nullptr;
         const MetalComputeState *activeComputeState = nullptr;
-        const MetalDescriptorSet* renderDescriptorSets[MAX_DESCRIPTOR_SET_BINDINGS] = {};
-        const MetalDescriptorSet* computeDescriptorSets[MAX_DESCRIPTOR_SET_BINDINGS] = {};
+        MetalDescriptorSet* renderDescriptorSets[MAX_DESCRIPTOR_SET_BINDINGS] = {};
+        MetalDescriptorSet* computeDescriptorSets[MAX_DESCRIPTOR_SET_BINDINGS] = {};
+
+        MTL::Fence *timestampQueryFence = nullptr;
 
         std::unordered_set<MetalDescriptorSet*> currentEncoderDescriptorSets;
         void bindEncoderResources(MTL::CommandEncoder* encoder, bool isCompute);
@@ -430,7 +507,20 @@ namespace plume {
         void checkForUpdatesInGraphicsState();
         void setCommonClearState() const;
         void handlePendingClears();
+
+        void barrierWait(MetalBarrierStage stage, MTL::RenderCommandEncoder* encoder);
+        void barrierWait(MetalBarrierStage stage, MTL::ComputeCommandEncoder* encoder);
+        void barrierWait(MetalBarrierStage stage, MTL::BlitCommandEncoder* encoder);
+
+        void barrierUpdate(MetalBarrierStage stage, MTL::RenderCommandEncoder* encoder);
+        void barrierUpdate(MetalBarrierStage stage, MTL::ComputeCommandEncoder* encoder);
+        void barrierUpdate(MetalBarrierStage stage, MTL::BlitCommandEncoder* encoder);
+
+        MTL::Fence* getBarrierStageFence(MetalBarrierStage stage);
+        void setBarrier(uint64_t sourceStageMask, uint64_t destStageMask);
     };
+
+    static uint64_t toStageMask(RenderBarrierStages stages);
 
     struct MetalCommandFence : RenderCommandFence {
         dispatch_semaphore_t semaphore;
@@ -454,7 +544,7 @@ namespace plume {
         MetalCommandQueue(MetalDevice *device, RenderCommandListType type);
         ~MetalCommandQueue() override;
         std::unique_ptr<RenderCommandList> createCommandList() override;
-        std::unique_ptr<RenderSwapChain> createSwapChain(RenderWindow renderWindow, uint32_t bufferCount, RenderFormat format, uint32_t maxFrameLatency) override;
+        std::unique_ptr<RenderSwapChain> createSwapChain(const RenderSwapChainDesc &desc) override;
         void executeCommandLists(const RenderCommandList **commandLists, uint32_t commandListCount, RenderCommandSemaphore **waitSemaphores, uint32_t waitSemaphoreCount, RenderCommandSemaphore **signalSemaphores, uint32_t signalSemaphoreCount, RenderCommandFence *signalFence) override;
         void waitForCommandFence(RenderCommandFence *fence) override;
     };
@@ -464,6 +554,8 @@ namespace plume {
         MetalPool *pool = nullptr;
         MetalDevice *device = nullptr;
         RenderBufferDesc desc;
+        RenderBarrierStages barrierStages = RenderBarrierStage::NONE;
+        bool addressable = false;
 
         MetalBuffer() = default;
         MetalBuffer(MetalDevice *device, MetalPool *pool, const RenderBufferDesc &desc);
@@ -486,9 +578,7 @@ namespace plume {
     struct MetalDrawable : ExtendedRenderTexture {
         CA::MetalDrawable *mtl = nullptr;
 
-
         MetalDrawable() = default;
-        MetalDrawable(MetalDevice *device, MetalPool *pool, const RenderTextureDesc &desc);
         ~MetalDrawable() override;
         std::unique_ptr<RenderTextureView> createTextureView(const RenderTextureViewDesc &desc) const override;
         void setName(const std::string &name) override;
@@ -496,13 +586,14 @@ namespace plume {
     };
 
     struct MetalTexture : ExtendedRenderTexture {
+        MetalDevice *device = nullptr;
         MTL::Texture *mtl = nullptr;
         RenderTextureLayout layout = RenderTextureLayout::UNKNOWN;
         MetalPool *pool = nullptr;
         MTL::Drawable *drawable = nullptr;
 
         MetalTexture() = default;
-        MetalTexture(const MetalDevice *device, MetalPool *pool, const RenderTextureDesc &desc);
+        MetalTexture(MetalDevice *device, MetalPool *pool, const RenderTextureDesc &desc);
         ~MetalTexture() override;
         std::unique_ptr<RenderTextureView> createTextureView(const RenderTextureViewDesc &desc) const override;
         void setName(const std::string &name) override;
@@ -598,7 +689,7 @@ namespace plume {
 
         MetalPipelineLayout(MetalDevice *device, const RenderPipelineLayoutDesc &desc);
         ~MetalPipelineLayout() override;
-        void bindDescriptorSets(MTL::CommandEncoder* encoder, const MetalDescriptorSet* const* descriptorSets, uint32_t descriptorSetCount, bool isCompute, uint32_t startIndex, std::unordered_set<MetalDescriptorSet*>& encoderDescriptorSets) const;
+        void bindDescriptorSets(MTL::CommandEncoder* encoder, const MetalDescriptorSet* const* descriptorSets, uint32_t descriptorSetCount, bool isCompute, uint32_t startIndex, std::unordered_set<MetalDescriptorSet*>& encoderDescriptorSets, bool usingResidencySets) const;
     };
 
     struct MetalDevice : RenderDevice {
@@ -606,6 +697,8 @@ namespace plume {
         MetalInterface *renderInterface = nullptr;
         RenderDeviceCapabilities capabilities;
         RenderDeviceDescription description;
+        bool useArgumentBuffersTier2 = false;
+        bool useDirectBufferAddresses = false;
 
         // Resolve functionality
         MTL::ComputePipelineState *resolveTexturePipelineState;
@@ -625,7 +718,16 @@ namespace plume {
         // Blit functionality
         MTL::BlitPassDescriptor *sharedBlitDescriptor = nullptr;
 
+        // Placeholder null buffer
         std::unique_ptr<RenderBuffer> nullBuffer;
+
+        // Resource residency management
+        std::vector<MTL::Resource*> gpuAddressableResources;
+        MTL::ResidencySet* residencySet = nullptr;
+        std::mutex resourcesMutex;
+
+        // Counter sets for query pools
+        MTL::CounterSet* timestampCounterSet = nullptr;
 
         explicit MetalDevice(MetalInterface *renderInterface, const std::string &preferredDeviceName);
         ~MetalDevice() override;
@@ -656,11 +758,16 @@ namespace plume {
         bool beginCapture() override;
         bool endCapture() override;
 
+        MTL::CounterSet* findTimestampCounterSet() const;
+
         // Shader libraries and pipeline states used for emulated operations
         void createResolvePipelineState();
         void createClearShaderLibrary();
 
         MTL::RenderPipelineState* getOrCreateClearRenderPipelineState(MTL::RenderPipelineDescriptor *pipelineDesc, bool depthWriteEnabled = false, bool stencilWriteEnabled = false);
+
+        void addResource(MTL::Resource *resource, bool addressable = false);
+        void removeResource(MTL::Resource *resource, bool addressable = false);
     };
 
     struct MetalInterface : RenderInterface {

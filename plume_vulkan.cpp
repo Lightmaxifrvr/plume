@@ -321,14 +321,16 @@ namespace plume {
 #   ifdef VULKAN_OBJECT_NAMES_ENABLED
         VK_EXT_DEBUG_UTILS_EXTENSION_NAME,
 #   endif
-#   if defined(_WIN64)
+#   if defined(_WIN32)
         VK_KHR_WIN32_SURFACE_EXTENSION_NAME,
 #   elif defined(__SWITCH__)
         VK_NN_VI_SURFACE_EXTENSION_NAME,
 #   elif defined(__ANDROID__)
         VK_KHR_ANDROID_SURFACE_EXTENSION_NAME,
 #   elif defined(__linux__)
+#   if !defined(PLUME_SDL_VULKAN_ENABLED)
         VK_KHR_XLIB_SURFACE_EXTENSION_NAME,
+#   endif
 #   elif defined(__APPLE__)
         VK_EXT_METAL_SURFACE_EXTENSION_NAME,
 #   endif
@@ -347,13 +349,14 @@ namespace plume {
     
     static const std::unordered_set<std::string> RequiredDeviceExtensions = {
         VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+    };
+    
+    static const std::unordered_set<std::string> OptionalDeviceExtensions = {
+        VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME,
         VK_EXT_SCALAR_BLOCK_LAYOUT_EXTENSION_NAME,
         VK_EXT_ROBUSTNESS_2_EXTENSION_NAME,
         VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME,
         VK_KHR_SAMPLER_MIRROR_CLAMP_TO_EDGE_EXTENSION_NAME,
-    };
-    
-    static const std::unordered_set<std::string> OptionalDeviceExtensions = {
         VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
         VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
         VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME,
@@ -603,6 +606,18 @@ namespace plume {
         }
     }
 
+    static VkFrontFace toVk(RenderFrontFace frontFace) {
+        switch (frontFace) {
+        case RenderFrontFace::CLOCKWISE:
+            return VK_FRONT_FACE_CLOCKWISE;
+        case RenderFrontFace::COUNTER_CLOCKWISE:
+            return VK_FRONT_FACE_COUNTER_CLOCKWISE;
+        default:
+            assert(false && "Unknown front face.");
+            return VK_FRONT_FACE_CLOCKWISE;
+        }
+    }
+
     static VkPrimitiveTopology toVk(RenderPrimitiveTopology topology) {
         switch (topology) {
         case RenderPrimitiveTopology::POINT_LIST:
@@ -827,7 +842,7 @@ namespace plume {
         }
     }
 
-    static VkSamplerAddressMode toVk(RenderTextureAddressMode mode) {
+    static VkSamplerAddressMode toVk(RenderTextureAddressMode mode, bool samplerMirrorClampToEdgeSupported) {
         switch (mode) {
         case RenderTextureAddressMode::WRAP:
             return VK_SAMPLER_ADDRESS_MODE_REPEAT;
@@ -838,6 +853,7 @@ namespace plume {
         case RenderTextureAddressMode::BORDER:
             return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
         case RenderTextureAddressMode::MIRROR_ONCE:
+            assert(samplerMirrorClampToEdgeSupported && "MIRROR_ONCE is not supported when samplerMirrorClampToEdge is not supported.");
             return VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_EDGE;
         default:
             assert(false && "Unknown texture address mode.");
@@ -1108,10 +1124,11 @@ namespace plume {
         bufferInfo.usage |= (desc.flags & RenderBufferFlag::ACCELERATION_STRUCTURE_SCRATCH) ? VK_BUFFER_USAGE_STORAGE_BUFFER_BIT : 0;
         bufferInfo.usage |= (desc.flags & RenderBufferFlag::ACCELERATION_STRUCTURE_INPUT) ? VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR : 0;
         bufferInfo.usage |= (desc.flags & RenderBufferFlag::SHADER_BINDING_TABLE) ? VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR : 0;
-
+        
         const uint32_t deviceAddressMask = RenderBufferFlag::CONSTANT | RenderBufferFlag::ACCELERATION_STRUCTURE | RenderBufferFlag::ACCELERATION_STRUCTURE_SCRATCH | RenderBufferFlag::ACCELERATION_STRUCTURE_INPUT | RenderBufferFlag::SHADER_BINDING_TABLE;
-        bufferInfo.usage |= (desc.flags & deviceAddressMask) ? VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT : 0;
-
+        const bool useDeviceAddress = device->capabilities.bufferDeviceAddress && (desc.flags & deviceAddressMask);
+        bufferInfo.usage |= useDeviceAddress ? VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT : 0;
+        
         VmaAllocationCreateInfo createInfo = {};
         /* TODO: Debug pools.
         createInfo.pool = (pool != nullptr) ? pool->vk : VK_NULL_HANDLE;
@@ -1209,10 +1226,11 @@ namespace plume {
     }
 
     void VulkanBuffer::setName(const std::string &name) {
-        setObjectName(device->vk, VK_OBJECT_TYPE_IMAGE, uint64_t(vk), name);
+        setObjectName(device->vk, VK_OBJECT_TYPE_BUFFER, uint64_t(vk), name);
     }
 
     uint64_t VulkanBuffer::getDeviceAddress() const {
+        assert((desc.flags & RenderBufferFlag::DEVICE_ADDRESSABLE) != 0 && "Buffer must have been created with GPU_ADDRESSABLE flag.");
         VkBufferDeviceAddressInfo info;
         info.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
         info.pNext = nullptr;
@@ -1624,9 +1642,9 @@ namespace plume {
         samplerInfo.minFilter = toVk(desc.minFilter);
         samplerInfo.magFilter = toVk(desc.magFilter);
         samplerInfo.mipmapMode = toVk(desc.mipmapMode);
-        samplerInfo.addressModeU = toVk(desc.addressU);
-        samplerInfo.addressModeV = toVk(desc.addressV);
-        samplerInfo.addressModeW = toVk(desc.addressW);
+        samplerInfo.addressModeU = toVk(desc.addressU, device->capabilities.samplerMirrorClampToEdge);
+        samplerInfo.addressModeV = toVk(desc.addressV, device->capabilities.samplerMirrorClampToEdge);
+        samplerInfo.addressModeW = toVk(desc.addressW, device->capabilities.samplerMirrorClampToEdge);
         samplerInfo.mipLodBias = desc.mipLODBias;
         samplerInfo.anisotropyEnable = desc.anisotropyEnabled;
         samplerInfo.maxAnisotropy = float(desc.maxAnisotropy);
@@ -1812,7 +1830,7 @@ namespace plume {
         rasterization.polygonMode = VK_POLYGON_MODE_FILL;
         rasterization.lineWidth = 1.0f;
         rasterization.cullMode = toVk(desc.cullMode);
-        rasterization.frontFace = VK_FRONT_FACE_CLOCKWISE;
+        rasterization.frontFace = toVk(desc.frontFace);
 
         if (desc.dynamicDepthBiasEnabled) {
             rasterization.depthBiasEnable = true;
@@ -2159,7 +2177,7 @@ namespace plume {
 
         this->descriptorSetCount = uint32_t(pipelineLayout->descriptorSetLayouts.size());
 
-        VkResult res = vkCreateRayTracingPipelinesKHR(device->vk, nullptr, nullptr, 1, &pipelineInfo, nullptr, &vk);
+        VkResult res = vkCreateRayTracingPipelinesKHR(device->vk, VK_NULL_HANDLE, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &vk);
         if (res != VK_SUCCESS) {
             fprintf(stderr, "vkCreateRayTracingPipelinesKHR failed with error code 0x%X.\n", res);
             return;
@@ -2377,22 +2395,20 @@ namespace plume {
 
     // VulkanSwapChain
 
-    VulkanSwapChain::VulkanSwapChain(VulkanCommandQueue *commandQueue, RenderWindow renderWindow, uint32_t textureCount, RenderFormat format, uint32_t maxFrameLatency) {
+    VulkanSwapChain::VulkanSwapChain(VulkanCommandQueue *commandQueue, const RenderSwapChainDesc &desc) {
         assert(commandQueue != nullptr);
-        assert(textureCount > 0);
+        assert(desc.textureCount > 0);
 
         this->commandQueue = commandQueue;
-        this->renderWindow = renderWindow;
-        this->format = format;
-        this->maxFrameLatency = maxFrameLatency;
+        this->desc = desc;
 
         VkResult res;
 
-#   ifdef _WIN64
-        assert(renderWindow != 0);
+#   if defined(_WIN32)
+        assert(desc.renderWindow != 0);
         VkWin32SurfaceCreateInfoKHR surfaceCreateInfo = {};
         surfaceCreateInfo.sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR;
-        surfaceCreateInfo.hwnd = HWND(renderWindow);
+        surfaceCreateInfo.hwnd = HWND(desc.renderWindow);
         surfaceCreateInfo.hinstance = GetModuleHandle(nullptr);
 
         VulkanInterface *renderInterface = commandQueue->device->renderInterface;
@@ -2415,16 +2431,22 @@ namespace plume {
         }
 #   elif defined(SDL_VULKAN_ENABLED)
         VulkanInterface *renderInterface = commandQueue->device->renderInterface;
-        SDL_bool sdlRes = SDL_Vulkan_CreateSurface(renderWindow, renderInterface->instance, &surface);
+        SDL_bool sdlRes = SDL_Vulkan_CreateSurface(desc.renderWindow, renderInterface->instance, &surface);
         if (sdlRes == SDL_FALSE) {
             fprintf(stderr, "SDL_Vulkan_CreateSurface failed with error %s.\n", SDL_GetError());
             return;
         }
+#   elif defined(PLUME_SDL3_VULKAN_ENABLED)
+        VulkanInterface *renderInterface = commandQueue->device->renderInterface;
+        if (!SDL_Vulkan_CreateSurface(desc.renderWindow, renderInterface->instance, nullptr, &surface)) {
+            fprintf(stderr, "SDL_Vulkan_CreateSurface failed with error %s.\n", SDL_GetError());
+            return;
+        }
 #   elif defined(__ANDROID__)
-        assert(renderWindow != nullptr);
+        assert(desc.renderWindow != nullptr);
         VkAndroidSurfaceCreateInfoKHR surfaceCreateInfo = {};
         surfaceCreateInfo.sType = VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR;
-        surfaceCreateInfo.window = renderWindow;
+        surfaceCreateInfo.window = desc.renderWindow;
 
         VulkanInterface *renderInterface = commandQueue->device->renderInterface;
         res = vkCreateAndroidSurfaceKHR(renderInterface->instance, &surfaceCreateInfo, nullptr, &surface);
@@ -2433,12 +2455,12 @@ namespace plume {
             return;
         }
 #   elif defined(__linux__)
-        assert(renderWindow.display != 0);
-        assert(renderWindow.window != 0);
+        assert(desc.renderWindow.display != 0);
+        assert(desc.renderWindow.window != 0);
         VkXlibSurfaceCreateInfoKHR surfaceCreateInfo = {};
         surfaceCreateInfo.sType = VK_STRUCTURE_TYPE_XLIB_SURFACE_CREATE_INFO_KHR;
-        surfaceCreateInfo.dpy = renderWindow.display;
-        surfaceCreateInfo.window = renderWindow.window;
+        surfaceCreateInfo.dpy = desc.renderWindow.display;
+        surfaceCreateInfo.window = desc.renderWindow.window;
 
         VulkanInterface *renderInterface = commandQueue->device->renderInterface;
         res = vkCreateXlibSurfaceKHR(renderInterface->instance, &surfaceCreateInfo, nullptr, &surface);
@@ -2447,14 +2469,14 @@ namespace plume {
             return;
         }
 #   elif defined(__APPLE__)
-        assert(renderWindow.window != 0);
-        assert(renderWindow.view != 0);
+        assert(desc.renderWindow.window != 0);
+        assert(desc.renderWindow.view != 0);
         // Creates a wrapper around the window for storing and fetching sizes.
-        this->windowWrapper = std::make_unique<CocoaWindow>(renderWindow.window);
+        this->windowWrapper = std::make_unique<CocoaWindow>(desc.renderWindow.window);
         
         VkMetalSurfaceCreateInfoEXT surfaceCreateInfo = {};
         surfaceCreateInfo.sType = VK_STRUCTURE_TYPE_METAL_SURFACE_CREATE_INFO_EXT;
-        surfaceCreateInfo.pLayer = renderWindow.view;
+        surfaceCreateInfo.pLayer = desc.renderWindow.view;
 
         VulkanInterface *renderInterface = commandQueue->device->renderInterface;
         res = vkCreateMetalSurfaceEXT(renderInterface->instance, &surfaceCreateInfo, nullptr, &surface);
@@ -2511,10 +2533,11 @@ namespace plume {
         std::vector<VkPresentModeKHR> presentModes(presentModeCount);
         vkGetPhysicalDeviceSurfacePresentModesKHR(physicalDevice, surface, &presentModeCount, presentModes.data());
         immediatePresentModeSupported = std::find(presentModes.begin(), presentModes.end(), VK_PRESENT_MODE_IMMEDIATE_KHR) != presentModes.end();
+        mailboxPresentModeSupported = std::find(presentModes.begin(), presentModes.end(), VK_PRESENT_MODE_MAILBOX_KHR) != presentModes.end();
 
         // Check if the format we requested is part of the supported surface formats.
         std::vector<VkSurfaceFormatKHR> compatibleSurfaceFormats;
-        VkFormat requestedFormat = toVk(format);
+        VkFormat requestedFormat = toVk(desc.format);
         for (uint32_t i = 0; i < surfaceFormatCount; i++) {
             if (surfaceFormats[i].format == requestedFormat) {
                 compatibleSurfaceFormats.emplace_back(surfaceFormats[i]);
@@ -2539,8 +2562,8 @@ namespace plume {
             pickedSurfaceFormat = compatibleSurfaceFormats[0];
         }
 
-        // FIFO is guaranteed to be supported.
-        requiredPresentMode = VK_PRESENT_MODE_FIFO_KHR;
+        // Sets the required presentation mode.
+        setVsyncEnabled(true);
 
         // Pick an alpha compositing mode, prefer opaque over inherit.
         if (surfaceCapabilities.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR) {
@@ -2616,7 +2639,9 @@ namespace plume {
         presentInfo.waitSemaphoreCount = uint32_t(waitSemaphoresVector.size());
 
         VkPresentIdKHR presentId = {};
-        if (commandQueue->device->capabilities.presentWait) {
+        if (desc.enablePresentWait) {
+            assert(commandQueue->device->capabilities.presentWait && "Present wait must be supported by the RenderDevice.");
+
             currentPresentId++;
             presentId.sType = VK_STRUCTURE_TYPE_PRESENT_ID_KHR;
             presentId.pPresentIds = &currentPresentId;
@@ -2700,9 +2725,11 @@ namespace plume {
     }
 
     void VulkanSwapChain::wait() {
-        if (commandQueue->device->capabilities.presentWait && (currentPresentId >= maxFrameLatency)) {
+        assert(desc.enablePresentWait && "Present wait should've been explicitly enabled during swap chain creation before using the wait function.");
+
+        if (currentPresentId >= desc.maxFrameLatency) {
             constexpr uint64_t waitTimeout = 100000000;
-            vkWaitForPresentKHR(commandQueue->device->vk, vk, currentPresentId - (maxFrameLatency - 1), waitTimeout);
+            vkWaitForPresentKHR(commandQueue->device->vk, vk, currentPresentId - (desc.maxFrameLatency - 1), waitTimeout);
         }
     }
 
@@ -2720,13 +2747,19 @@ namespace plume {
 #endif
         releaseImageViews();
 
-        // We don't actually need to query the surface capabilities but the validation layer seems to cache the valid extents from this call.
+        // Query surface capabilities to get the valid extent bounds.
         VkSurfaceCapabilitiesKHR surfaceCapabilities = {};
         vkGetPhysicalDeviceSurfaceCapabilitiesKHR(commandQueue->device->physicalDevice, surface, &surfaceCapabilities);
 
+        // Clamp the extent to the surface capabilities' min/max bounds.
+        // This is required because the window size may differ from the valid surface extent
+        // (e.g., due to window decorations, compositor behavior, or timing issues).
+        width = std::clamp(width, surfaceCapabilities.minImageExtent.width, surfaceCapabilities.maxImageExtent.width);
+        height = std::clamp(height, surfaceCapabilities.minImageExtent.height, surfaceCapabilities.maxImageExtent.height);
+
         createInfo.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
         createInfo.surface = surface;
-        createInfo.minImageCount = textureCount;
+        createInfo.minImageCount = desc.textureCount;
         createInfo.imageFormat = pickedSurfaceFormat.format;
         createInfo.imageColorSpace = pickedSurfaceFormat.colorSpace;
         createInfo.imageExtent.width = width;
@@ -2763,13 +2796,13 @@ namespace plume {
 
         uint32_t retrievedImageCount = 0;
         vkGetSwapchainImagesKHR(commandQueue->device->vk, vk, &retrievedImageCount, nullptr);
-        if (retrievedImageCount < textureCount) {
+        if (retrievedImageCount < desc.textureCount) {
             releaseSwapChain();
             fprintf(stderr, "Image count differs from the texture count.\n");
             return false;
         }
 
-        textureCount = retrievedImageCount;
+        desc.textureCount = retrievedImageCount;
 
 #if defined(__SWITCH__)
         if (frameGenerationCompatible && textureCount < 3) {
@@ -2787,12 +2820,12 @@ namespace plume {
         }
 
         // Assign the swap chain images to the buffer resources.
-        textures.resize(textureCount);
+        textures.resize(desc.textureCount);
 
-        for (uint32_t i = 0; i < textureCount; i++) {
+        for (uint32_t i = 0; i < desc.textureCount; i++) {
             textures[i] = VulkanTexture(commandQueue->device, images[i]);
             textures[i].desc.dimension = RenderTextureDimension::TEXTURE_2D;
-            textures[i].desc.format = format;
+            textures[i].desc.format = desc.format;
             textures[i].desc.width = width;
             textures[i].desc.height = height;
             textures[i].desc.depth = 1;
@@ -2823,13 +2856,17 @@ namespace plume {
 #endif
         // Immediate mode must be supported and the presentation mode will only be used on the next resize.
         // needsResize() will return as true as long as the created and required present mode do not match.
-        if (immediatePresentModeSupported) {
-            requiredPresentMode = vsyncEnabled ? VK_PRESENT_MODE_FIFO_KHR : VK_PRESENT_MODE_IMMEDIATE_KHR;
+        if (immediatePresentModeSupported && !vsyncEnabled) {
+            requiredPresentMode = VK_PRESENT_MODE_IMMEDIATE_KHR;
+        }
+        // FIFO is guaranteed to be supported.
+        else {
+            requiredPresentMode = VK_PRESENT_MODE_FIFO_KHR;
         }
     }
 
     bool VulkanSwapChain::isVsyncEnabled() const {
-        return createdPresentMode == VK_PRESENT_MODE_FIFO_KHR;
+        return (createdPresentMode == VK_PRESENT_MODE_FIFO_KHR) || (createdPresentMode == VK_PRESENT_MODE_MAILBOX_KHR);
     }
 
     uint32_t VulkanSwapChain::getWidth() const {
@@ -2845,11 +2882,11 @@ namespace plume {
     }
 
     uint32_t VulkanSwapChain::getTextureCount() const {
-        return textureCount;
+        return desc.textureCount;
     }
 
     RenderWindow VulkanSwapChain::getWindow() const {
-        return renderWindow;
+        return desc.renderWindow;
     }
 
     bool VulkanSwapChain::isEmpty() const {
@@ -2868,13 +2905,13 @@ namespace plume {
     }
 
     void VulkanSwapChain::getWindowSize(uint32_t &dstWidth, uint32_t &dstHeight) const {
-#   if defined(_WIN64)
+#   if defined(_WIN32)
         RECT rect;
-        GetClientRect(renderWindow, &rect);
+        GetClientRect(desc.renderWindow, &rect);
         dstWidth = rect.right - rect.left;
         dstHeight = rect.bottom - rect.top;
-#   elif defined(SDL_VULKAN_ENABLED)
-        SDL_GetWindowSizeInPixels(renderWindow, (int *)(&dstWidth), (int *)(&dstHeight));
+#   elif defined(PLUME_SDL_VULKAN_ENABLED)
+        SDL_GetWindowSizeInPixels(desc.renderWindow, (int *)(&dstWidth), (int *)(&dstHeight));
 #   elif defined(__ANDROID__)
         dstWidth = ANativeWindow_getWidth(renderWindow);
         dstHeight = ANativeWindow_getHeight(renderWindow);
@@ -2896,7 +2933,7 @@ namespace plume {
         }
 #   elif defined(__linux__)
         XWindowAttributes attributes;
-        XGetWindowAttributes(renderWindow.display, renderWindow.window, &attributes);
+        XGetWindowAttributes(desc.renderWindow.display, desc.renderWindow.window, &attributes);
         // The attributes width and height members do not include the border.
         dstWidth = attributes.width;
         dstHeight = attributes.height;
@@ -3254,6 +3291,7 @@ namespace plume {
 
         VkCommandBufferBeginInfo beginInfo = {};
         beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
 
         VkResult res = vkBeginCommandBuffer(vk, &beginInfo);
         if (res != VK_SUCCESS) {
@@ -3366,6 +3404,8 @@ namespace plume {
     }
 
     void VulkanCommandList::dispatch(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ) {
+        assert(activeComputePipelineLayout != nullptr);
+
         vkCmdDispatch(vk, threadGroupCountX, threadGroupCountY, threadGroupCountZ);
     }
 
@@ -3373,6 +3413,7 @@ namespace plume {
         const VulkanBuffer *interfaceBuffer = static_cast<const VulkanBuffer *>(shaderBindingTable.ref);
         assert(interfaceBuffer != nullptr);
         assert((interfaceBuffer->desc.flags & RenderBufferFlag::SHADER_BINDING_TABLE) && "Buffer must allow being used as a shader binding table.");
+        assert(activeRaytracingPipelineLayout != nullptr);
 
         VkBufferDeviceAddressInfo tableAddressInfo = {};
         tableAddressInfo.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
@@ -3403,12 +3444,14 @@ namespace plume {
     }
 
     void VulkanCommandList::drawInstanced(uint32_t vertexCountPerInstance, uint32_t instanceCount, uint32_t startVertexLocation, uint32_t startInstanceLocation) {
+        assert(activeGraphicsPipelineLayout != nullptr);
         checkActiveRenderPass();
 
         vkCmdDraw(vk, vertexCountPerInstance, instanceCount, startVertexLocation, startInstanceLocation);
     }
     
     void VulkanCommandList::drawIndexedInstanced(uint32_t indexCountPerInstance, uint32_t instanceCount, uint32_t startIndexLocation, int32_t baseVertexLocation, uint32_t startInstanceLocation) {
+        assert(activeGraphicsPipelineLayout != nullptr);
         checkActiveRenderPass();
 
         vkCmdDrawIndexed(vk, indexCountPerInstance, instanceCount, startIndexLocation, baseVertexLocation, startInstanceLocation);
@@ -3782,6 +3825,31 @@ namespace plume {
             imageCopy.imageExtent.depth = srcLocation.placedFootprint.depth;
             vkCmdCopyBufferToImage(vk, srcBuffer->vk, dstTexture->vk, toImageLayout(dstTexture->textureLayout), 1, &imageCopy);
         }
+        else if ((dstLocation.type == RenderTextureCopyType::PLACED_FOOTPRINT) && (srcLocation.type == RenderTextureCopyType::SUBRESOURCE)) {
+            assert(dstBuffer != nullptr);
+            assert(srcTexture != nullptr);
+
+            const uint32_t blockWidth = RenderFormatBlockWidth(srcTexture->desc.format);
+            const uint32_t blockSize = RenderFormatSize(srcTexture->desc.format);
+            const uint32_t bytesPerRow = ((dstLocation.placedFootprint.rowWidth + blockWidth - 1) / blockWidth) * blockSize;
+            const uint32_t bytesPerImage = bytesPerRow * ((dstLocation.placedFootprint.height + blockWidth - 1) / blockWidth);
+            const uint32_t mipLevel = srcLocation.subresource.mipLevel;
+            VkBufferImageCopy imageCopy = {};
+            imageCopy.bufferOffset = dstLocation.placedFootprint.offset + dstZ * bytesPerImage + (dstY / blockWidth) * bytesPerRow + (dstX / blockWidth) * blockSize;
+            imageCopy.bufferRowLength = ((dstLocation.placedFootprint.rowWidth + blockWidth - 1) / blockWidth) * blockWidth;
+            imageCopy.bufferImageHeight = ((dstLocation.placedFootprint.height + blockWidth - 1) / blockWidth) * blockWidth;
+            imageCopy.imageSubresource.aspectMask = toAspectFlags(srcTexture->desc.format, srcTexture->desc.flags);
+            imageCopy.imageSubresource.baseArrayLayer = srcLocation.subresource.arrayIndex;
+            imageCopy.imageSubresource.layerCount = 1;
+            imageCopy.imageSubresource.mipLevel = srcLocation.subresource.mipLevel;
+            imageCopy.imageOffset.x = srcBox != nullptr ? srcBox->left : 0;
+            imageCopy.imageOffset.y = srcBox != nullptr ? srcBox->top : 0;
+            imageCopy.imageOffset.z = srcBox != nullptr ? srcBox->front : 0;
+            imageCopy.imageExtent.width = srcBox != nullptr ? uint32_t(srcBox->right - srcBox->left) : std::max(srcTexture->desc.width >> mipLevel, 1U);
+            imageCopy.imageExtent.height = srcBox != nullptr ? uint32_t(srcBox->bottom - srcBox->top) : std::max(srcTexture->desc.height >> mipLevel, 1U);
+            imageCopy.imageExtent.depth = srcBox != nullptr ? uint32_t(srcBox->back - srcBox->front) : std::max(srcTexture->desc.depth >> mipLevel, 1U);
+            vkCmdCopyImageToBuffer(vk, srcTexture->vk, toImageLayout(srcTexture->textureLayout), dstBuffer->vk, 1, &imageCopy);
+        }
         else {
             VkImageCopy imageCopy = {};
             imageCopy.srcSubresource.aspectMask = toAspectFlags(srcTexture->desc.format, srcTexture->desc.flags);
@@ -3873,6 +3941,8 @@ namespace plume {
     }
 
     void VulkanCommandList::resolveTextureRegion(const RenderTexture *dstTexture, uint32_t dstX, uint32_t dstY, const RenderTexture *srcTexture, const RenderRect *srcRect, RenderResolveMode resolveMode) {
+        endActiveRenderPass();
+
         assert(dstTexture != nullptr);
         assert(srcTexture != nullptr);
         assert(resolveMode == RenderResolveMode::AVERAGE && "Vulkan only supports AVERAGE resolve mode.");
@@ -4126,8 +4196,8 @@ namespace plume {
         return std::make_unique<VulkanCommandList>(this);
     }
 
-    std::unique_ptr<RenderSwapChain> VulkanCommandQueue::createSwapChain(RenderWindow renderWindow, uint32_t bufferCount, RenderFormat format, uint32_t maxFrameLatency) {
-        return std::make_unique<VulkanSwapChain>(this, renderWindow, bufferCount, format, maxFrameLatency);
+    std::unique_ptr<RenderSwapChain> VulkanCommandQueue::createSwapChain(const RenderSwapChainDesc &desc) {
+        return std::make_unique<VulkanSwapChain>(this, desc);
     }
 
     void VulkanCommandQueue::executeCommandLists(const RenderCommandList **commandLists, uint32_t commandListCount, RenderCommandSemaphore **waitSemaphores, uint32_t waitSemaphoreCount, RenderCommandSemaphore **signalSemaphores, uint32_t signalSemaphoreCount, RenderCommandFence *signalFence) {
@@ -4400,13 +4470,19 @@ namespace plume {
         // Check for supported features.
         void *featuresChain = nullptr;
         VkPhysicalDeviceDescriptorIndexingFeatures indexingFeatures = {};
-        indexingFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES;
-        featuresChain = &indexingFeatures;
+        const bool descriptorIndexingFound = supportedOptionalExtensions.find(VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME) != supportedOptionalExtensions.end();
+        if (descriptorIndexingFound) {
+            indexingFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES;
+            featuresChain = &indexingFeatures;
+        }
 
         VkPhysicalDeviceScalarBlockLayoutFeatures layoutFeatures = {};
-        layoutFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SCALAR_BLOCK_LAYOUT_FEATURES;
-        layoutFeatures.pNext = featuresChain;
-        featuresChain = &layoutFeatures;
+        const bool scalarBlockLayoutFound = supportedOptionalExtensions.find(VK_EXT_SCALAR_BLOCK_LAYOUT_EXTENSION_NAME) != supportedOptionalExtensions.end();
+        if (scalarBlockLayoutFound) {
+            layoutFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SCALAR_BLOCK_LAYOUT_FEATURES;
+            layoutFeatures.pNext = featuresChain;
+            featuresChain = &layoutFeatures;
+        }
 
 #if defined(__SWITCH__)
         VkPhysicalDeviceTimelineSemaphoreFeatures timelineFeatures = {};
@@ -4419,8 +4495,8 @@ namespace plume {
 
         VkPhysicalDevicePresentIdFeaturesKHR presentIdFeatures = {};
         VkPhysicalDevicePresentWaitFeaturesKHR presentWaitFeatures = {};
-        const bool presentWaitSupported = supportedOptionalExtensions.find(VK_KHR_PRESENT_ID_EXTENSION_NAME) != supportedOptionalExtensions.end() && supportedOptionalExtensions.find(VK_KHR_PRESENT_WAIT_EXTENSION_NAME) != supportedOptionalExtensions.end();
-        if (presentWaitSupported) {
+        const bool presentWaitFound = supportedOptionalExtensions.find(VK_KHR_PRESENT_ID_EXTENSION_NAME) != supportedOptionalExtensions.end() && supportedOptionalExtensions.find(VK_KHR_PRESENT_WAIT_EXTENSION_NAME) != supportedOptionalExtensions.end();
+        if (presentWaitFound) {
             presentIdFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR;
             presentIdFeatures.pNext = featuresChain;
             featuresChain = &presentIdFeatures;
@@ -4431,49 +4507,59 @@ namespace plume {
         }
 
         VkPhysicalDeviceRobustness2FeaturesEXT robustnessFeatures = {};
-        robustnessFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT;
-        robustnessFeatures.pNext = featuresChain;
-        featuresChain = &robustnessFeatures;
+        const bool robustnessFound = supportedOptionalExtensions.find(VK_EXT_ROBUSTNESS_2_EXTENSION_NAME) != supportedOptionalExtensions.end();
+        if (robustnessFound) {
+            robustnessFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT;
+            robustnessFeatures.pNext = featuresChain;
+            featuresChain = &robustnessFeatures;
+        }
 
         VkPhysicalDeviceBufferDeviceAddressFeatures bufferDeviceAddressFeatures = {};
-        bufferDeviceAddressFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES;
-        bufferDeviceAddressFeatures.pNext = featuresChain;
-        featuresChain = &bufferDeviceAddressFeatures;
+        const bool bufferDeviceAddressFound = supportedOptionalExtensions.find(VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME) != supportedOptionalExtensions.end();
+        if (bufferDeviceAddressFound) {
+            bufferDeviceAddressFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES;
+            bufferDeviceAddressFeatures.pNext = featuresChain;
+            featuresChain = &bufferDeviceAddressFeatures;
+        }
 
         VkPhysicalDevicePortabilitySubsetFeaturesKHR portabilityFeatures = {};
-        portabilityFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PORTABILITY_SUBSET_FEATURES_KHR;
-        portabilityFeatures.pNext = featuresChain;
-        featuresChain = &portabilityFeatures;
+        const bool portabilityFound = supportedOptionalExtensions.find(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME) != supportedOptionalExtensions.end();
+        if (portabilityFound) {
+            portabilityFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PORTABILITY_SUBSET_FEATURES_KHR;
+            portabilityFeatures.pNext = featuresChain;
+            featuresChain = &portabilityFeatures;
+        }
+
+        VkPhysicalDeviceRayTracingPipelineFeaturesKHR rayTracingPipelineFeatures = {};
+        VkPhysicalDeviceAccelerationStructureFeaturesKHR accelerationStructureFeatures = {};
+        const bool rayTracingFound = (supportedOptionalExtensions.find(VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME) != supportedOptionalExtensions.end()) && (supportedOptionalExtensions.find(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME) != supportedOptionalExtensions.end());
+        if (rayTracingFound) {
+            rayTracingPipelineFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR;
+            rayTracingPipelineFeatures.pNext = featuresChain;
+            featuresChain = &rayTracingPipelineFeatures;
+
+            accelerationStructureFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
+            accelerationStructureFeatures.pNext = featuresChain;
+            featuresChain = &accelerationStructureFeatures;
+        }
 
         VkPhysicalDeviceFeatures2 deviceFeatures = {};
         deviceFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
         deviceFeatures.pNext = featuresChain;
         vkGetPhysicalDeviceFeatures2(physicalDevice, &deviceFeatures);
 
-        void *createDeviceChain = nullptr;
-        VkPhysicalDeviceRayTracingPipelineFeaturesKHR rtPipelineFeatures = {};
-        VkPhysicalDeviceAccelerationStructureFeaturesKHR accelerationStructureFeatures = {};
-        const bool rtSupported = supportedOptionalExtensions.find(VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME) != supportedOptionalExtensions.end();
-        if (rtSupported) {
+        // Check for properties.
+        if (rayTracingFound) {
             rtPipelineProperties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR;
 
             VkPhysicalDeviceProperties2 deviceProperties2 = {};
             deviceProperties2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
             deviceProperties2.pNext = &rtPipelineProperties;
             vkGetPhysicalDeviceProperties2(physicalDevice, &deviceProperties2);
-
-            rtPipelineFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR;
-            rtPipelineFeatures.rayTracingPipeline = true;
-            createDeviceChain = &rtPipelineFeatures;
-
-            accelerationStructureFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
-            accelerationStructureFeatures.pNext = createDeviceChain;
-            accelerationStructureFeatures.accelerationStructure = true;
-            createDeviceChain = &accelerationStructureFeatures;
         }
-        
-        const bool sampleLocationsSupported = supportedOptionalExtensions.find(VK_EXT_SAMPLE_LOCATIONS_EXTENSION_NAME) != supportedOptionalExtensions.end();
-        if (sampleLocationsSupported) {
+
+        const bool sampleLocationsFound = supportedOptionalExtensions.find(VK_EXT_SAMPLE_LOCATIONS_EXTENSION_NAME) != supportedOptionalExtensions.end();
+        if (sampleLocationsFound) {
             sampleLocationProperties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SAMPLE_LOCATIONS_PROPERTIES_EXT;
 
             VkPhysicalDeviceProperties2 deviceProperties2 = {};
@@ -4482,20 +4568,31 @@ namespace plume {
             vkGetPhysicalDeviceProperties2(physicalDevice, &deviceProperties2);
         }
 
-        const bool descriptorIndexing = indexingFeatures.descriptorBindingPartiallyBound && indexingFeatures.descriptorBindingVariableDescriptorCount && indexingFeatures.runtimeDescriptorArray;
-        if (descriptorIndexing) {
+        // Build the device creation chain.
+        void *createDeviceChain = nullptr;
+        const bool rayTracingSupported = rayTracingPipelineFeatures.rayTracingPipeline && accelerationStructureFeatures.accelerationStructure;
+        if (rayTracingSupported) {
+            rayTracingPipelineFeatures.pNext = createDeviceChain;
+            createDeviceChain = &rayTracingPipelineFeatures;
+
+            accelerationStructureFeatures.pNext = createDeviceChain;
+            createDeviceChain = &accelerationStructureFeatures;
+        }
+
+        const bool descriptorIndexingSupported = indexingFeatures.descriptorBindingPartiallyBound && indexingFeatures.descriptorBindingVariableDescriptorCount && indexingFeatures.runtimeDescriptorArray;
+        if (descriptorIndexingSupported) {
             indexingFeatures.pNext = createDeviceChain;
             createDeviceChain = &indexingFeatures;
         }
 
-        const bool scalarBlockLayout = layoutFeatures.scalarBlockLayout;
-        if (scalarBlockLayout) {
+        const bool scalarBlockLayoutSupported = layoutFeatures.scalarBlockLayout;
+        if (scalarBlockLayoutSupported) {
             layoutFeatures.pNext = createDeviceChain;
             createDeviceChain = &layoutFeatures;
         }
 
-        const bool presentWait = presentIdFeatures.presentId && presentWaitFeatures.presentWait;
-        if (presentWait) {
+        const bool presentWaitSupported = presentIdFeatures.presentId && presentWaitFeatures.presentWait;
+        if (presentWaitSupported) {
             presentIdFeatures.pNext = createDeviceChain;
             createDeviceChain = &presentIdFeatures;
 
@@ -4503,20 +4600,19 @@ namespace plume {
             createDeviceChain = &presentWaitFeatures;
         }
 
-        const bool nullDescriptor = robustnessFeatures.nullDescriptor;
-        if (nullDescriptor) {
+        nullDescriptorSupported = robustnessFeatures.nullDescriptor;
+        if (nullDescriptorSupported) {
             robustnessFeatures.pNext = createDeviceChain;
             createDeviceChain = &robustnessFeatures;
         }
 
-        const bool bufferDeviceAddress = bufferDeviceAddressFeatures.bufferDeviceAddress;
-        if (bufferDeviceAddress) {
+        const bool bufferDeviceAddressSupported = bufferDeviceAddressFeatures.bufferDeviceAddress;
+        if (bufferDeviceAddressSupported) {
             bufferDeviceAddressFeatures.pNext = createDeviceChain;
             createDeviceChain = &bufferDeviceAddressFeatures;
         }
-
-        const bool portabilitySubset = supportedOptionalExtensions.find(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME) != supportedOptionalExtensions.end();
-        if (portabilitySubset) {
+        
+        if (portabilityFound) {
             portabilityFeatures.pNext = createDeviceChain;
             createDeviceChain = &portabilityFeatures;
         }
@@ -4658,7 +4754,7 @@ namespace plume {
         vmaFunctions.vkCmdCopyBuffer = vkCmdCopyBuffer;
 
         VmaAllocatorCreateInfo allocatorInfo = {};
-        allocatorInfo.flags |= bufferDeviceAddress ? VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT : 0;
+        allocatorInfo.flags |= bufferDeviceAddressSupported ? VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT : 0;
         allocatorInfo.physicalDevice = physicalDevice;
         allocatorInfo.device = vk;
         allocatorInfo.pVulkanFunctions = &vmaFunctions;
@@ -4696,14 +4792,16 @@ namespace plume {
 
         // Fill capabilities.
         capabilities.geometryShader = deviceFeatures.features.geometryShader;
-        capabilities.raytracing = rtSupported;
+        capabilities.raytracing = rayTracingSupported;
         capabilities.raytracingStateUpdate = false;
-        capabilities.sampleLocations = sampleLocationsSupported;
+        capabilities.sampleLocations = (sampleLocationProperties.sampleLocationSampleCounts != 0);
+        capabilities.resolveRegion = true;
         capabilities.resolveModes = false;
-        capabilities.descriptorIndexing = descriptorIndexing;
-        capabilities.scalarBlockLayout = scalarBlockLayout;
-        capabilities.bufferDeviceAddress = bufferDeviceAddress;
-        capabilities.presentWait = presentWait;
+        capabilities.descriptorIndexing = descriptorIndexingSupported;
+        capabilities.scalarBlockLayout = scalarBlockLayoutSupported;
+        capabilities.bufferDeviceAddress = bufferDeviceAddressSupported;
+        capabilities.samplerMirrorClampToEdge = supportedOptionalExtensions.find(VK_KHR_SAMPLER_MIRROR_CLAMP_TO_EDGE_EXTENSION_NAME) != supportedOptionalExtensions.end();
+        capabilities.presentWait = presentWaitSupported;
         capabilities.displayTiming = supportedOptionalExtensions.find(VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME) != supportedOptionalExtensions.end();
         capabilities.maxTextureSize = physicalDeviceProperties.limits.maxImageDimension2D;
         capabilities.preferHDR = memoryHeapSize > (512 * 1024 * 1024);
@@ -4723,7 +4821,6 @@ namespace plume {
 
         // Fill Vulkan-only capabilities.
         loadStoreOpNoneSupported = supportedOptionalExtensions.find(VK_EXT_LOAD_STORE_OP_NONE_EXTENSION_NAME) != supportedOptionalExtensions.end();
-        nullDescriptorSupported = nullDescriptor;
 
         if (!nullDescriptorSupported) {
             nullBuffer = createBuffer(RenderBufferDesc::DefaultBuffer(16, RenderBufferFlag::VERTEX));
@@ -5139,7 +5236,7 @@ namespace plume {
 
     // VulkanInterface
 
-#if SDL_VULKAN_ENABLED
+#if defined(PLUME_SDL2_VULKAN_ENABLED)
     VulkanInterface::VulkanInterface(RenderWindow sdlWindow) {
 #else
     VulkanInterface::VulkanInterface() {
@@ -5217,10 +5314,9 @@ namespace plume {
         const std::unordered_set<std::string> dlssExtensions = DLSS::getRequiredInstanceExtensionsVulkan();
 #   endif
 
-#   if SDL_VULKAN_ENABLED
+#   if PLUME_SDL2_VULKAN_ENABLED
         // Push the extensions specified by SDL as required.
         // SDL2 has this awkward requirement for the window to pull the extensions from. 
-        // This can be removed when upgrading to SDL3.
         if (sdlWindow != nullptr) {
             uint32_t sdlVulkanExtensionCount = 0;
             if (SDL_Vulkan_GetInstanceExtensions(sdlWindow, &sdlVulkanExtensionCount, nullptr)) {
@@ -5231,6 +5327,17 @@ namespace plume {
                         requiredExtensions.insert(sdlVulkanExtension);
                     }
                 }
+            }
+        }
+#   elif PLUME_SDL3_VULKAN_ENABLED
+        // Push the extensions specified by SDL as required.
+        // SDL3 no longer needs a window, the app must have created a window
+        // with SDL_WINDOW_VULKAN, or called SDL_Vulkan_LoadLibrary before this.
+        uint32_t sdlVulkanExtensionCount = 0;
+        const char * const *sdlVulkanExtensions = SDL_Vulkan_GetInstanceExtensions(&sdlVulkanExtensionCount);
+        if (sdlVulkanExtensions != nullptr) {
+            for (uint32_t i = 0; i < sdlVulkanExtensionCount; i++) {
+                requiredExtensions.insert(sdlVulkanExtensions[i]);
             }
         }
 #   endif
@@ -5369,7 +5476,7 @@ namespace plume {
 
     // Global creation function.
 
-#if SDL_VULKAN_ENABLED
+#if defined(PLUME_SDL2_VULKAN_ENABLED)
     std::unique_ptr<RenderInterface> CreateVulkanInterface(RenderWindow sdlWindow) {
         std::unique_ptr<VulkanInterface> createdInterface = std::make_unique<VulkanInterface>(sdlWindow);
         return createdInterface->isValid() ? std::move(createdInterface) : nullptr;

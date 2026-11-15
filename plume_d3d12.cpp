@@ -9,6 +9,8 @@
 
 #include <unordered_set>
 
+#include <dxgi1_5.h>
+
 #ifdef __clang__
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wtautological-undefined-compare"
@@ -34,10 +36,12 @@
 #define D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE (D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE)
 #endif
 
+#ifdef PLUME_D3D12_AGILITY_SDK_ENABLED
 extern "C" {
     __declspec(dllexport) extern const UINT D3D12SDKVersion = D3D12_SDK_VERSION;
     __declspec(dllexport) extern const char* D3D12SDKPath = ".\\D3D12\\";
 }
+#endif
 
 namespace plume {
     static const uint32_t ShaderDescriptorHeapSize = 65536;
@@ -48,15 +52,15 @@ namespace plume {
 
     static std::wstring Utf8ToUtf16(const std::string_view& value) {
         std::wstring wideStr;
-        wideStr.resize(MultiByteToWideChar(CP_UTF8, 0, value.data(), value.size(), nullptr, 0));
-        MultiByteToWideChar(CP_UTF8, 0, value.data(), value.size(), wideStr.data(), wideStr.size());
+        wideStr.resize(MultiByteToWideChar(CP_UTF8, 0, value.data(), int(value.size()), nullptr, 0));
+        MultiByteToWideChar(CP_UTF8, 0, value.data(), int(value.size()), wideStr.data(), int(wideStr.size()));
         return wideStr;
     }
 
     static std::string Utf16ToUtf8(const std::wstring_view& value) {
         std::string multiByteStr;
-        multiByteStr.resize(WideCharToMultiByte(CP_UTF8, 0, value.data(), value.size(), nullptr, 0, nullptr, FALSE));
-        WideCharToMultiByte(CP_UTF8, 0, value.data(), value.size(), multiByteStr.data(), multiByteStr.size(), nullptr, FALSE);
+        multiByteStr.resize(WideCharToMultiByte(CP_UTF8, 0, value.data(), int(value.size()), nullptr, 0, nullptr, FALSE));
+        WideCharToMultiByte(CP_UTF8, 0, value.data(), int(value.size()), multiByteStr.data(), int(multiByteStr.size()), nullptr, FALSE);
         return multiByteStr;
     }
 
@@ -537,7 +541,7 @@ namespace plume {
             return D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;     
         case RenderPrimitiveTopology::TRIANGLE_STRIP:
             return D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP;
-#   ifdef D3D12_AGILITY_SDK_ENABLED
+#   ifdef PLUME_D3D12_AGILITY_SDK_ENABLED
         case RenderPrimitiveTopology::TRIANGLE_FAN:
             return D3D_PRIMITIVE_TOPOLOGY_TRIANGLEFAN;
 #   endif
@@ -875,7 +879,7 @@ namespace plume {
     D3D12_CPU_DESCRIPTOR_HANDLE D3D12DescriptorHeapAllocator::getCPUHandleAt(uint32_t index) const {
         assert(index < heapSize);
         assert(cpuDescriptorHandle.ptr > 0);
-        return { cpuDescriptorHandle.ptr + uint64_t(index) * descriptorHandleIncrement };
+        return { cpuDescriptorHandle.ptr + SIZE_T(index) * descriptorHandleIncrement };
     }
 
     D3D12_GPU_DESCRIPTOR_HANDLE D3D12DescriptorHeapAllocator::getGPUHandleAt(uint32_t index) const {
@@ -1311,55 +1315,57 @@ namespace plume {
 
     // D3D12SwapChain
 
-    D3D12SwapChain::D3D12SwapChain(D3D12CommandQueue *commandQueue, RenderWindow renderWindow, uint32_t textureCount, RenderFormat format, uint32_t maxFrameLatency) {
+    D3D12SwapChain::D3D12SwapChain(D3D12CommandQueue *commandQueue, const RenderSwapChainDesc &desc) {
         assert(commandQueue != nullptr);
-        assert(renderWindow != 0);
+        assert(desc.renderWindow != 0);
 
         this->commandQueue = commandQueue;
-        this->renderWindow = renderWindow;
-        this->textureCount = textureCount;
-        this->format = format;
-        this->maxFrameLatency = maxFrameLatency;
+        this->desc = desc;
         
         // Store the native format representation.
-        nativeFormat = toDXGI(format);
+        nativeFormat = toDXGI(desc.format);
 
         getWindowSize(width, height);
+
+        swapChainFlags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
+        if (commandQueue->device->renderInterface->allowTearing) {
+            swapChainFlags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+        }
         
         DXGI_SWAP_CHAIN_DESC1 swapChainDesc = {};
-        swapChainDesc.BufferCount = textureCount;
+        swapChainDesc.BufferCount = desc.textureCount;
         swapChainDesc.Width = width;
         swapChainDesc.Height = height;
         swapChainDesc.Format = nativeFormat;
         swapChainDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
         swapChainDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
         swapChainDesc.SampleDesc.Count = 1;
-        swapChainDesc.Flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT | DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+        swapChainDesc.Flags = swapChainFlags;
 
         IDXGISwapChain1 *swapChain1;
         IDXGIFactory4 *dxgiFactory = commandQueue->device->renderInterface->dxgiFactory;
-        HRESULT res = dxgiFactory->CreateSwapChainForHwnd(commandQueue->d3d, renderWindow, &swapChainDesc, nullptr, nullptr, &swapChain1);
+        HRESULT res = dxgiFactory->CreateSwapChainForHwnd(commandQueue->d3d, desc.renderWindow, &swapChainDesc, nullptr, nullptr, &swapChain1);
         if (FAILED(res)) {
             fprintf(stderr, "CreateSwapChainForHwnd failed with error code 0x%lX.\n", res);
             return;
         }
 
-        res = dxgiFactory->MakeWindowAssociation(renderWindow, DXGI_MWA_NO_ALT_ENTER);
+        res = dxgiFactory->MakeWindowAssociation(desc.renderWindow, DXGI_MWA_NO_ALT_ENTER);
         if (FAILED(res)) {
             fprintf(stderr, "MakeWindowAssociation failed with error code 0x%lX.\n", res);
             return;
         }
 
         d3d = static_cast<IDXGISwapChain3 *>(swapChain1);
-        d3d->SetMaximumFrameLatency(maxFrameLatency);
+        d3d->SetMaximumFrameLatency(desc.maxFrameLatency);
         waitableObject = d3d->GetFrameLatencyWaitableObject();
 
-        textures.resize(textureCount);
+        textures.resize(desc.textureCount);
 
-        for (uint32_t i = 0; i < textureCount; i++) {
+        for (uint32_t i = 0; i < desc.textureCount; i++) {
             textures[i].device = commandQueue->device;
             textures[i].desc.dimension = RenderTextureDimension::TEXTURE_2D;
-            textures[i].desc.format = format;
+            textures[i].desc.format = desc.format;
             textures[i].desc.depth = 1;
             textures[i].desc.mipLevels = 1;
             textures[i].desc.arraySize = 1;
@@ -1370,7 +1376,7 @@ namespace plume {
     }
 
     D3D12SwapChain::~D3D12SwapChain() {
-        for (uint32_t i = 0; i < textureCount; i++) {
+        for (uint32_t i = 0; i < desc.textureCount; i++) {
             if (textures[i].d3d != nullptr) {
                 textures[i].d3d->Release();
                 textures[i].d3d = nullptr;
@@ -1383,13 +1389,17 @@ namespace plume {
     }
 
     bool D3D12SwapChain::present(uint32_t textureIndex, RenderCommandSemaphore **waitSemaphores, uint32_t waitSemaphoreCount) {
-        UINT syncInterval = vsyncEnabled ? 1 : 0;
-        UINT flags = !vsyncEnabled ? DXGI_PRESENT_ALLOW_TEARING : 0;
+        // If using present wait, we prefer using a SyncInterval of 0 even when Vsync is enabled. Tearing won't happen if DXGI_PRESENT_ALLOW_TEARING is not specified.
+        const bool tearingAllowed = (swapChainFlags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) != 0U;
+        UINT syncInterval = (vsyncEnabled && !desc.enablePresentWait) ? 1 : 0;
+        UINT flags = (!vsyncEnabled && tearingAllowed) ? DXGI_PRESENT_ALLOW_TEARING : 0;
         HRESULT res = d3d->Present(syncInterval, flags);
         return SUCCEEDED(res);
     }
 
     void D3D12SwapChain::wait() {
+        assert(desc.enablePresentWait && "Present wait should've been explicitly enabled during swap chain creation before using the wait function.");
+
         if (waitableObject != NULL) {
             WaitForSingleObject(waitableObject, INFINITE);
         }
@@ -1403,12 +1413,12 @@ namespace plume {
             return false;
         }
 
-        for (uint32_t i = 0; i < textureCount; i++) {
+        for (uint32_t i = 0; i < desc.textureCount; i++) {
             textures[i].d3d->Release();
             textures[i].d3d = nullptr;
         }
 
-        HRESULT res = d3d->ResizeBuffers(0, 0, 0, DXGI_FORMAT_UNKNOWN, DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT | DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING);
+        HRESULT res = d3d->ResizeBuffers(0, 0, 0, DXGI_FORMAT_UNKNOWN, swapChainFlags);
         if (FAILED(res)) {
             fprintf(stderr, "ResizeBuffers failed with error code 0x%lX.\n", res);
             return false;
@@ -1442,15 +1452,15 @@ namespace plume {
 
     void D3D12SwapChain::getWindowSize(uint32_t &dstWidth, uint32_t &dstHeight) const {
         RECT rect;
-        GetClientRect(renderWindow, &rect);
+        GetClientRect(desc.renderWindow, &rect);
         dstWidth = rect.right - rect.left;
         dstHeight = rect.bottom - rect.top;
     }
 
     void D3D12SwapChain::setTextures() {
-        assert(textureCount == textures.size());
+        assert(desc.textureCount == textures.size());
 
-        for (uint32_t i = 0; i < textureCount; i++) {
+        for (uint32_t i = 0; i < desc.textureCount; i++) {
             d3d->GetBuffer(i, IID_PPV_ARGS(&textures[i].d3d));
 
             textures[i].desc.width = width;
@@ -1465,7 +1475,7 @@ namespace plume {
     }
 
     uint32_t D3D12SwapChain::getTextureCount() const {
-        return textureCount;
+        return desc.textureCount;
     }
 
     bool D3D12SwapChain::acquireTexture(RenderCommandSemaphore *signalSemaphore, uint32_t *textureIndex) {
@@ -1475,7 +1485,7 @@ namespace plume {
     }
 
     RenderWindow D3D12SwapChain::getWindow() const {
-        return renderWindow;
+        return desc.renderWindow;
     }
 
     bool D3D12SwapChain::isEmpty() const {
@@ -1797,7 +1807,7 @@ namespace plume {
         readbackBuffer->unmap();
 
         for (uint64_t &result : results) {
-            result = result / double(device->timestampFrequency) * 1000000000.0;
+            result = uint64_t(double(result) / double(device->timestampFrequency) * 1000000000.0);
         }
     }
 
@@ -1844,6 +1854,14 @@ namespace plume {
             return;
         }
 
+        // Attempt to query the interfaces available for this command list.
+        d3d->QueryInterface(IID_PPV_ARGS(&d3dV1));
+        d3d->QueryInterface(IID_PPV_ARGS(&d3dV4));
+
+#   ifdef PLUME_D3D12_AGILITY_SDK_ENABLED
+        d3d->QueryInterface(IID_PPV_ARGS(&d3dV9));
+#   endif
+
         d3d->Close();
     }
 
@@ -1889,6 +1907,10 @@ namespace plume {
         
         auto makeBarrier = [&](ID3D12Resource *resource, D3D12_RESOURCE_STATES stateBefore, D3D12_RESOURCE_STATES stateAfter, bool supportsUAV, D3D12_RESOURCE_BARRIER &resourceBarrier) {
             resourceBarrier = {};
+
+            if (queue->type == RenderCommandListType::COPY) {
+                return false;
+            }
 
             if (stateBefore != stateAfter) {
                 resourceBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -1957,10 +1979,15 @@ namespace plume {
     }
 
     void D3D12CommandList::dispatch(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ) {
+        assert(activeComputePipelineLayout != nullptr);
+
         d3d->Dispatch(threadGroupCountX, threadGroupCountY, threadGroupCountZ);
     }
 
     void D3D12CommandList::traceRays(uint32_t width, uint32_t height, uint32_t depth, RenderBufferReference shaderBindingTable, const RenderShaderBindingGroupsInfo &shaderBindingGroupsInfo) {
+        assert(d3dV4 != nullptr);
+        assert(activeComputePipelineLayout != nullptr); // Ray tracing uses compute layout
+
         const D3D12Buffer *interfaceBuffer = static_cast<const D3D12Buffer *>(shaderBindingTable.ref);
         assert(interfaceBuffer != nullptr);
         assert((interfaceBuffer->desc.flags & RenderBufferFlag::SHADER_BINDING_TABLE) && "Buffer must allow being used as a shader binding table.");
@@ -1985,20 +2012,24 @@ namespace plume {
         desc.Width = width;
         desc.Height = height;
         desc.Depth = depth;
-        d3d->DispatchRays(&desc);
+        d3dV4->DispatchRays(&desc);
     }
     
     void D3D12CommandList::drawInstanced(uint32_t vertexCountPerInstance, uint32_t instanceCount, uint32_t startVertexLocation, uint32_t startInstanceLocation) {
+        assert(activeGraphicsPipelineLayout != nullptr);
         checkTopology();
         checkStencilRef();
         checkFramebufferSamplePositions();
+
         d3d->DrawInstanced(vertexCountPerInstance, instanceCount, startVertexLocation, startInstanceLocation);
     }
 
     void D3D12CommandList::drawIndexedInstanced(uint32_t indexCountPerInstance, uint32_t instanceCount, uint32_t startIndexLocation, int32_t baseVertexLocation, uint32_t startInstanceLocation) {
+        assert(activeGraphicsPipelineLayout != nullptr);
         checkTopology();
         checkStencilRef();
         checkFramebufferSamplePositions();
+
         d3d->DrawIndexedInstanced(indexCountPerInstance, instanceCount, startIndexLocation, baseVertexLocation, startInstanceLocation);
     }
 
@@ -2019,8 +2050,9 @@ namespace plume {
             break;
         }
         case D3D12Pipeline::Type::Raytracing: {
+            assert(d3dV4 != nullptr);
             const D3D12RaytracingPipeline *raytracingPipeline = static_cast<const D3D12RaytracingPipeline *>(interfacePipeline);
-            d3d->SetPipelineState1(raytracingPipeline->stateObject);
+            d3dV4->SetPipelineState1(raytracingPipeline->stateObject);
             break;
         }
         default:
@@ -2206,9 +2238,10 @@ namespace plume {
     }
 
     void D3D12CommandList::setDepthBias(float depthBias, float depthBiasClamp, float slopeScaledDepthBias) {
-#   ifdef D3D12_AGILITY_SDK_ENABLED
+#   ifdef PLUME_D3D12_AGILITY_SDK_ENABLED
+        assert(d3dV9 != nullptr);
         assert(queue->device->capabilities.dynamicDepthBias && "Dynamic depth bias is unsupported on this device.");
-        d3d->RSSetDepthBias(depthBias, depthBiasClamp, slopeScaledDepthBias);
+        d3dV9->RSSetDepthBias(depthBias, depthBiasClamp, slopeScaledDepthBias);
 #   else
         assert(false && "Dynamic depth bias is unsupported without the Agility SDK.");
 #   endif
@@ -2279,7 +2312,11 @@ namespace plume {
 
         const D3D12_TEXTURE_COPY_LOCATION copyDstLocation = toD3D12(dstLocation);
         const D3D12_TEXTURE_COPY_LOCATION copySrcLocation = toD3D12(srcLocation);
-        setSamplePositions(dstLocation.texture);
+
+        if (dstLocation.type == RenderTextureCopyType::SUBRESOURCE) {
+            setSamplePositions(dstLocation.texture);
+        }
+
         d3d->CopyTextureRegion(&copyDstLocation, dstX, dstY, dstZ, &copySrcLocation, (srcBox != nullptr) ? &copyBox : nullptr);
         resetSamplePositions();
     }
@@ -2310,17 +2347,22 @@ namespace plume {
 
         const D3D12Texture *interfaceDstTexture = static_cast<const D3D12Texture *>(dstTexture);
         const D3D12Texture *interfaceSrcTexture = static_cast<const D3D12Texture *>(srcTexture);
+        const RenderFormat dstFormat = interfaceDstTexture->desc.format;
+        const bool depthTarget = interfaceDstTexture->desc.flags & RenderTextureFlag::DEPTH_TARGET;
         setSamplePositions(interfaceDstTexture);
-        d3d->ResolveSubresource(interfaceDstTexture->d3d, 0, interfaceSrcTexture->d3d, 0, toDXGI(interfaceDstTexture->desc.format));
+        d3d->ResolveSubresource(interfaceDstTexture->d3d, 0, interfaceSrcTexture->d3d, 0, depthTarget ? toDXGIDepthStencilView(dstFormat) : toDXGI(dstFormat));
         resetSamplePositions();
     }
 
     void D3D12CommandList::resolveTextureRegion(const RenderTexture *dstTexture, uint32_t dstX, uint32_t dstY, const RenderTexture *srcTexture, const RenderRect *srcRect, RenderResolveMode resolveMode) {
+        assert(d3dV1 != nullptr);
         assert(dstTexture != nullptr);
         assert(srcTexture != nullptr);
 
         const D3D12Texture *interfaceDstTexture = static_cast<const D3D12Texture *>(dstTexture);
         const D3D12Texture *interfaceSrcTexture = static_cast<const D3D12Texture *>(srcTexture);
+        const RenderFormat dstFormat = interfaceDstTexture->desc.format;
+        const bool depthTarget = interfaceDstTexture->desc.flags & RenderTextureFlag::DEPTH_TARGET;
         D3D12_RECT rect;
         if (srcRect != nullptr) {
             rect.left = srcRect->left;
@@ -2330,11 +2372,12 @@ namespace plume {
         }
 
         setSamplePositions(interfaceDstTexture);
-        d3d->ResolveSubresourceRegion(interfaceDstTexture->d3d, 0, dstX, dstY, interfaceSrcTexture->d3d, 0, (srcRect != nullptr) ? &rect : nullptr, toDXGI(interfaceDstTexture->desc.format), toD3D12(resolveMode));
+        d3dV1->ResolveSubresourceRegion(interfaceDstTexture->d3d, 0, dstX, dstY, interfaceSrcTexture->d3d, 0, (srcRect != nullptr) ? &rect : nullptr, depthTarget ? toDXGIDepthStencilView(dstFormat) : toDXGI(dstFormat), toD3D12(resolveMode));
         resetSamplePositions();
     }
 
     void D3D12CommandList::buildBottomLevelAS(const RenderAccelerationStructure *dstAccelerationStructure, RenderBufferReference scratchBuffer, const RenderBottomLevelASBuildInfo &buildInfo) {
+        assert(d3dV4 != nullptr);
         assert(dstAccelerationStructure != nullptr);
         assert(scratchBuffer.ref != nullptr);
 
@@ -2353,10 +2396,11 @@ namespace plume {
         buildDesc.DestAccelerationStructureData = interfaceAccelerationStructure->buffer->d3d->GetGPUVirtualAddress() + interfaceAccelerationStructure->offset;
         buildDesc.ScratchAccelerationStructureData = interfaceScratchBuffer->d3d->GetGPUVirtualAddress() + scratchBuffer.offset;
 
-        d3d->BuildRaytracingAccelerationStructure(&buildDesc, 0, nullptr);
+        d3dV4->BuildRaytracingAccelerationStructure(&buildDesc, 0, nullptr);
     }
 
     void D3D12CommandList::buildTopLevelAS(const RenderAccelerationStructure *dstAccelerationStructure, RenderBufferReference scratchBuffer, RenderBufferReference instancesBuffer, const RenderTopLevelASBuildInfo &buildInfo) {
+        assert(d3dV4 != nullptr);
         assert(dstAccelerationStructure != nullptr);
         assert(scratchBuffer.ref != nullptr);
         assert(instancesBuffer.ref != nullptr);
@@ -2379,7 +2423,7 @@ namespace plume {
         buildDesc.DestAccelerationStructureData = interfaceAccelerationStructure->buffer->d3d->GetGPUVirtualAddress() + interfaceAccelerationStructure->offset;
         buildDesc.ScratchAccelerationStructureData = interfaceScratchBuffer->d3d->GetGPUVirtualAddress() + scratchBuffer.offset;
 
-        d3d->BuildRaytracingAccelerationStructure(&buildDesc, 0, nullptr);
+        d3dV4->BuildRaytracingAccelerationStructure(&buildDesc, 0, nullptr);
     }
 
     void D3D12CommandList::discardTexture(const RenderTexture* texture) {
@@ -2449,6 +2493,7 @@ namespace plume {
 
         const D3D12Texture *interfaceTexture = static_cast<const D3D12Texture *>(texture);
         if (interfaceTexture->desc.multisampling.sampleLocationsEnabled) {
+            assert(d3dV1 != nullptr);
             thread_local std::vector<D3D12_SAMPLE_POSITION> samplePositions;
             samplePositions.resize(interfaceTexture->desc.multisampling.sampleCount);
             for (uint32_t i = 0; i < interfaceTexture->desc.multisampling.sampleCount; i++) {
@@ -2457,7 +2502,7 @@ namespace plume {
                 samplePositions[i].Y = location.y;
             }
 
-            d3d->SetSamplePositions(uint32_t(samplePositions.size()), 1, samplePositions.data());
+            d3dV1->SetSamplePositions(uint32_t(samplePositions.size()), 1, samplePositions.data());
             activeSamplePositions = true;
         }
         else {
@@ -2467,7 +2512,8 @@ namespace plume {
 
     void D3D12CommandList::resetSamplePositions() {
         if (activeSamplePositions) {
-            d3d->SetSamplePositions(0, 0, nullptr);
+            assert(d3dV1 != nullptr);
+            d3dV1->SetSamplePositions(0, 0, nullptr);
             activeSamplePositions = false;
             targetFramebufferSamplePositionsSet = false;
         }
@@ -2574,11 +2620,13 @@ namespace plume {
 
         this->device = device;
 
-        HRESULT res = device->d3d->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&d3d));
+        HRESULT res = device->d3d->CreateFence(1, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&d3d));
         if (FAILED(res)) {
             fprintf(stderr, "CreateFence failed with error code 0x%lX.\n", res);
             return;
         }
+
+        semaphoreValue = 1;
     }
 
     D3D12CommandSemaphore::~D3D12CommandSemaphore() {
@@ -2632,8 +2680,8 @@ namespace plume {
         return std::make_unique<D3D12CommandList>(this);
     }
 
-    std::unique_ptr<RenderSwapChain> D3D12CommandQueue::createSwapChain(RenderWindow renderWindow, uint32_t bufferCount, RenderFormat format, uint32_t maxFrameLatency) {
-        return std::make_unique<D3D12SwapChain>(this, renderWindow, bufferCount, format, maxFrameLatency);
+    std::unique_ptr<RenderSwapChain> D3D12CommandQueue::createSwapChain(const RenderSwapChainDesc &desc) {
+        return std::make_unique<D3D12SwapChain>(this, desc);
     }
 
     void D3D12CommandQueue::executeCommandLists(const RenderCommandList **commandLists, uint32_t commandListCount, RenderCommandSemaphore **waitSemaphores, uint32_t waitSemaphoreCount, RenderCommandSemaphore **signalSemaphores, uint32_t signalSemaphoreCount, RenderCommandFence *signalFence) {
@@ -2686,9 +2734,10 @@ namespace plume {
         this->pool = pool;
         this->desc = desc;
 
+        // Constant buffers must be aligned to D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT (256 bytes).
         D3D12_RESOURCE_DESC resourceDesc = {};
         resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-        resourceDesc.Width = desc.size;
+        resourceDesc.Width = (desc.flags & RenderBufferFlag::CONSTANT) ? roundUp(desc.size, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT) : desc.size;
         resourceDesc.Height = 1;
         resourceDesc.DepthOrArraySize = 1;
         resourceDesc.MipLevels = 1;
@@ -2764,6 +2813,7 @@ namespace plume {
     }
 
     uint64_t D3D12Buffer::getDeviceAddress() const {
+        assert((desc.flags & RenderBufferFlag::DEVICE_ADDRESSABLE) != 0 && "Buffer must have been created with GPU_ADDRESSABLE flag.");
         return d3d->GetGPUVirtualAddress();
     }
 
@@ -3062,7 +3112,7 @@ namespace plume {
         psoDesc.RasterizerState.SlopeScaledDepthBias = desc.slopeScaledDepthBias;
 
         if (desc.dynamicDepthBiasEnabled) {
-#       ifdef D3D12_AGILITY_SDK_ENABLED
+#       ifdef PLUME_D3D12_AGILITY_SDK_ENABLED
             psoDesc.Flags |= D3D12_PIPELINE_STATE_FLAG_DYNAMIC_DEPTH_BIAS;
 #       else
             assert(false && "Dynamic depth bias is unsupported without the Agility SDK.");
@@ -3084,6 +3134,8 @@ namespace plume {
             return;
         }
 
+        psoDesc.RasterizerState.FrontCounterClockwise = desc.frontFace == RenderFrontFace::COUNTER_CLOCKWISE;
+
         psoDesc.DepthStencilState.DepthEnable = desc.depthEnabled;
         psoDesc.DepthStencilState.DepthWriteMask = desc.depthWriteEnabled ? D3D12_DEPTH_WRITE_MASK_ALL : D3D12_DEPTH_WRITE_MASK_ZERO;
         psoDesc.DepthStencilState.DepthFunc = toD3D12(desc.depthFunction);
@@ -3098,6 +3150,7 @@ namespace plume {
         psoDesc.DepthStencilState.BackFace.StencilDepthFailOp = toD3D12(desc.stencilBackFace.depthFailOp);
         psoDesc.DepthStencilState.BackFace.StencilPassOp = toD3D12(desc.stencilBackFace.passOp);
         psoDesc.DepthStencilState.BackFace.StencilFunc = toD3D12(desc.stencilBackFace.compareFunction);
+        stencilRef = desc.stencilReference;
         psoDesc.NumRenderTargets = desc.renderTargetCount;
         psoDesc.BlendState.AlphaToCoverageEnable = desc.alphaToCoverageEnabled;
 
@@ -3561,7 +3614,7 @@ namespace plume {
         }
 
         // Store the total amount of root parameters.
-        rootCount = rootParameters.size();
+        rootCount = uint32_t(rootParameters.size());
 
         // Fill root signature desc.
         D3D12_ROOT_SIGNATURE_DESC rootSignatureDesc = {};
@@ -3644,10 +3697,12 @@ namespace plume {
             }
 
             // Determine if the device supports sample locations.
+            bool resolveRegionOption = false;
             bool samplePositionsOption = false;
             D3D12_FEATURE_DATA_D3D12_OPTIONS2 d3d12Options2 = {};
             res = deviceOption->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS2, &d3d12Options2, sizeof(d3d12Options2));
             if (SUCCEEDED(res)) {
+                resolveRegionOption = true;
                 samplePositionsOption = d3d12Options2.ProgrammableSamplePositionsTier >= D3D12_PROGRAMMABLE_SAMPLE_POSITIONS_TIER_1;
             }
 
@@ -3665,7 +3720,7 @@ namespace plume {
             bool dynamicDepthBiasOption = false;
             bool gpuUploadHeapOption = false;
 
-#       ifdef D3D12_AGILITY_SDK_ENABLED
+#       ifdef PLUME_D3D12_AGILITY_SDK_ENABLED
             // Check if triangle fan is supported.
             D3D12_FEATURE_DATA_D3D12_OPTIONS15 d3d12Options15 = {};
             res = deviceOption->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS15, &d3d12Options15, sizeof(d3d12Options15));
@@ -3712,8 +3767,8 @@ namespace plume {
                 capabilities.raytracing = rtSupportOption;
                 capabilities.raytracingStateUpdate = rtStateUpdateSupportOption;
                 capabilities.sampleLocations = samplePositionsOption;
-                // Resolve modes require sample positions support.
-                capabilities.resolveModes = samplePositionsOption;
+                capabilities.resolveRegion = resolveRegionOption;
+                capabilities.resolveModes = samplePositionsOption; // Resolve modes require sample positions support.
                 capabilities.triangleFan = triangleFanSupportOption;
                 capabilities.dynamicDepthBias = dynamicDepthBiasOption;
                 capabilities.uma = uma;
@@ -3816,6 +3871,7 @@ namespace plume {
         capabilities.queryPools = true;
         capabilities.maxTextureSize = 16384;
         capabilities.preferHDR = description.dedicatedVideoMemory > (512 * 1024 * 1024);
+        capabilities.samplerMirrorClampToEdge = true;
 
         // Create descriptor heaps allocator.
         viewHeapAllocator = std::make_unique<D3D12DescriptorHeapAllocator>(this, ShaderDescriptorHeapSize, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
@@ -4016,7 +4072,7 @@ namespace plume {
                 groupInfo.size = 0;
             }
             else {
-                groupInfo.stride = roundUp(D3D12_RAYTRACING_SHADER_RECORD_BYTE_ALIGNMENT + sizeof(UINT64) * raytracingPipeline->pipelineLayout->rootCount, D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT);
+                groupInfo.stride = roundUp(D3D12_RAYTRACING_SHADER_RECORD_BYTE_ALIGNMENT + uint32_t(sizeof(UINT64)) * raytracingPipeline->pipelineLayout->rootCount, D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT);
                 groupInfo.offset = tableSize;
                 groupInfo.size = groupInfo.stride * renderGroup.pipelineProgramsCount;
                 tableSize += groupInfo.size;
@@ -4150,6 +4206,14 @@ namespace plume {
         if (FAILED(res)) {
             fprintf(stderr, "CreateDXGIFactory2 failed with error code 0x%lX.\n", res);
             return;
+        }
+
+        // Check for support for allowing tearing on the swap chain.
+        BOOL allowTearingBool = FALSE;
+        IDXGIFactory5 *dxgiFactory5 = nullptr;
+        if (SUCCEEDED(dxgiFactory->QueryInterface(IID_PPV_ARGS(&dxgiFactory5)))) {
+            res = dxgiFactory5->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING, &allowTearingBool, sizeof(allowTearingBool));
+            allowTearing = SUCCEEDED(res) && allowTearingBool;
         }
 
         // Fill capabilities.

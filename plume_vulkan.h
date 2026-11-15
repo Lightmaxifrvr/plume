@@ -23,7 +23,7 @@
 #define VK_USE_PLATFORM_WIN32_KHR
 #elif defined(__ANDROID__)
 #define VK_USE_PLATFORM_ANDROID_KHR
-#elif defined(__linux__)
+#elif defined(__linux__) && !defined(PLUME_SDL_VULKAN_ENABLED)
 #define VK_USE_PLATFORM_XLIB_KHR
 #elif defined(__APPLE__)
 #define VK_USE_PLATFORM_METAL_EXT
@@ -242,6 +242,7 @@ namespace plume {
     };
 
     struct VulkanSwapChain : RenderSwapChain {
+        RenderSwapChainDesc desc;
         VkSwapchainKHR vk = VK_NULL_HANDLE;
         VulkanCommandQueue *commandQueue = nullptr;
         VkSurfaceKHR surface = VK_NULL_HANDLE;
@@ -249,9 +250,7 @@ namespace plume {
 #if defined(__APPLE__) && !defined(__SWITCH__)
         std::unique_ptr<CocoaWindow> windowWrapper;
 #endif
-        uint32_t textureCount = 0;
         uint64_t presentCount = 0;
-        RenderFormat format = RenderFormat::UNKNOWN;
         uint32_t width = 0;
         uint32_t height = 0;
         VkSwapchainCreateInfoKHR createInfo = {};
@@ -269,7 +268,7 @@ namespace plume {
         bool frameGenerationInitAttempted = false;
 #endif
 
-        VulkanSwapChain(VulkanCommandQueue *commandQueue, RenderWindow renderWindow, uint32_t textureCount, RenderFormat format, uint32_t maxFrameLatency);
+        VulkanSwapChain(VulkanCommandQueue *commandQueue, const RenderSwapChainDesc &desc);
         ~VulkanSwapChain() override;
         bool present(uint32_t textureIndex, RenderCommandSemaphore **waitSemaphores, uint32_t waitSemaphoreCount) override;
         void wait() override;
@@ -432,7 +431,7 @@ namespace plume {
         VulkanCommandQueue(VulkanDevice *device, RenderCommandListType type);
         ~VulkanCommandQueue() override;
         std::unique_ptr<RenderCommandList> createCommandList() override;
-        std::unique_ptr<RenderSwapChain> createSwapChain(RenderWindow renderWindow, uint32_t bufferCount, RenderFormat format, uint32_t maxFrameLatency) override;
+        std::unique_ptr<RenderSwapChain> createSwapChain(const RenderSwapChainDesc &desc) override;
         void executeCommandLists(const RenderCommandList **commandLists, uint32_t commandListCount, RenderCommandSemaphore **waitSemaphores, uint32_t waitSemaphoreCount, RenderCommandSemaphore **signalSemaphores, uint32_t signalSemaphoreCount, RenderCommandFence *signalFence) override;
         void waitForCommandFence(RenderCommandFence *fence) override;
     };
@@ -525,7 +524,7 @@ namespace plume {
         RenderInterfaceCapabilities capabilities;
         std::vector<std::string> deviceNames;
 
-#   if SDL_VULKAN_ENABLED
+#   if defined(PLUME_SDL2_VULKAN_ENABLED)
         VulkanInterface(RenderWindow sdlWindow);
 #   else
         VulkanInterface();

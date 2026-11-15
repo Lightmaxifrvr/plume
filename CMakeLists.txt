@@ -1,6 +1,12 @@
-cmake_minimum_required(VERSION 3.12)
+cmake_minimum_required(VERSION 3.20)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_VISIBILITY_PRESET hidden)
+
+if(APPLE AND NOT CMAKE_OSX_DEPLOYMENT_TARGET)
+    # 10.15 because of our use of supportsFamily()
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "10.15" CACHE STRING "Minimum macOS deployment target")
+endif()
+
 project(plume)
 
 if(APPLE)
@@ -29,8 +35,12 @@ if(WIN32)
     add_compile_definitions(NOMINMAX)
 endif()
 
+if(PLUME_SDL2_VULKAN_ENABLED AND PLUME_SDL3_VULKAN_ENABLED)
+    message(FATAL_ERROR "Plume - PLUME_SDL2_VULKAN_ENABLED and PLUME_SDL3_VULKAN_ENABLED are mutually exclusive")
+endif()
+
 # Enable SDL Vulkan support
-if(SDL_VULKAN_ENABLED)
+if(PLUME_SDL2_VULKAN_ENABLED)
     if (NOT TARGET SDL2::SDL2)
         find_package(SDL2 REQUIRED)
     else()
@@ -38,10 +48,14 @@ if(SDL_VULKAN_ENABLED)
     endif()
 
     message(STATUS "Plume - Building with SDL2_INCLUDE_DIRS: ${SDL2_INCLUDE_DIRS}")
+elseif(PLUME_SDL3_VULKAN_ENABLED)
+    if (NOT TARGET SDL3::Headers)
+        find_package(SDL3 REQUIRED)
+    endif()
 endif()
 
 # Enable D3D12 Agility SDK support
-if(D3D12_AGILITY_SDK_ENABLED)
+if(PLUME_D3D12_AGILITY_SDK_ENABLED)
     find_package(directx-headers CONFIG REQUIRED)
     find_package(directx12-agility CONFIG REQUIRED)
 endif()
@@ -109,13 +123,16 @@ if(WIN32)
     )
 endif()
 
-if(SDL_VULKAN_ENABLED)
-    target_compile_definitions(plume PUBLIC SDL_VULKAN_ENABLED)
+if(PLUME_SDL2_VULKAN_ENABLED)
+    target_compile_definitions(plume PUBLIC PLUME_SDL2_VULKAN_ENABLED)
     target_include_directories(plume PUBLIC ${SDL2_INCLUDE_DIRS})
+elseif(PLUME_SDL3_VULKAN_ENABLED)
+    target_compile_definitions(plume PUBLIC PLUME_SDL3_VULKAN_ENABLED)
+    target_link_libraries(plume PUBLIC PUBLIC SDL3::Headers)
 endif()
 
-if(D3D12_AGILITY_SDK_ENABLED)
-    target_compile_definitions(plume PUBLIC D3D12_AGILITY_SDK_ENABLED)
+if(PLUME_D3D12_AGILITY_SDK_ENABLED)
+    target_compile_definitions(plume PUBLIC PLUME_D3D12_AGILITY_SDK_ENABLED)
     target_compile_definitions(plume PRIVATE D3D12MA_USING_DIRECTX_HEADERS)
     target_link_libraries(plume PRIVATE Microsoft::DirectX-Headers Microsoft::DirectX-Guids Microsoft::DirectX12-Agility)
 endif()
@@ -168,6 +185,10 @@ endif()
 
 # Platform-specific includes
 if(APPLE)
+    if(PLUME_APPLE_RETINA_ENABLED)
+        target_compile_definitions(plume PRIVATE PLUME_APPLE_RETINA_ENABLED)
+    endif()
+
     target_include_directories(plume PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/contrib/metal-cpp
     )
@@ -176,4 +197,4 @@ endif()
 # Add examples if requested
 if(PLUME_BUILD_EXAMPLES)
     add_subdirectory(examples)
-endif() 
+endif()

@@ -21,7 +21,7 @@
 #include <Windows.h>
 #elif defined(__ANDROID__)
 #include "android/native_window.h"
-#elif defined(__linux__)
+#elif defined(__linux__) && !defined(PLUME_SDL_VULKAN_ENABLED)
 #include "X11/Xlib.h"
 #undef None
 #undef Status
@@ -31,8 +31,10 @@
 #undef Always
 #endif
 
-#ifdef SDL_VULKAN_ENABLED
+#if defined(PLUME_SDL2_VULKAN_ENABLED)
 #include <SDL_vulkan.h>
+#elif defined(PLUME_SDL3_VULKAN_ENABLED)
+#include <SDL3/SDL_vulkan.h>
 #endif
 
 namespace plume {
@@ -44,7 +46,7 @@ namespace plume {
     typedef HWND RenderWindow;
 #elif defined(__ANDROID__)
     typedef ANativeWindow* RenderWindow;
-#elif defined(SDL_VULKAN_ENABLED)
+#elif defined(PLUME_SDL_VULKAN_ENABLED)
     typedef SDL_Window *RenderWindow;
 #elif defined(__linux__)
     struct RenderWindow {
@@ -202,27 +204,17 @@ namespace plume {
         TRIANGLE_FAN
     };
 
-    enum class RenderSRVType {
-        UNKNOWN,
-        BUFFER,
-        TEXTURE_1D,
-        TEXTURE_2D,
-        TEXTURE_3D
-    };
-
-    enum class RenderUAVType {
-        UNKNOWN,
-        BUFFER,
-        TEXTURE_1D,
-        TEXTURE_2D,
-        TEXTURE_3D
-    };
-
     enum class RenderCullMode {
         UNKNOWN,
         NONE,
         FRONT,
         BACK
+    };
+
+    enum class RenderFrontFace {
+        UNKNOWN,
+        CLOCKWISE,
+        COUNTER_CLOCKWISE
     };
 
     enum class RenderComparisonFunction {
@@ -441,7 +433,8 @@ namespace plume {
             ACCELERATION_STRUCTURE_INPUT = 1U << 6,
             ACCELERATION_STRUCTURE_SCRATCH = 1U << 7,
             SHADER_BINDING_TABLE = 1U << 8,
-            UNORDERED_ACCESS = 1U << 9
+            UNORDERED_ACCESS = 1U << 9,
+            DEVICE_ADDRESSABLE = 1U << 10
         };
     };
 
@@ -1160,6 +1153,26 @@ namespace plume {
         bool allowOnlyBuffers = false;
     };
 
+    struct RenderSwapChainDesc {
+        RenderWindow renderWindow = {};
+        RenderFormat format = RenderFormat::UNKNOWN;
+        uint32_t textureCount = 0;
+
+        // The capability for presentWait must be supported by the RenderDevice.
+        bool enablePresentWait = false;
+        uint32_t maxFrameLatency = 0;
+
+        RenderSwapChainDesc() = default;
+
+        RenderSwapChainDesc(RenderWindow renderWindow, RenderFormat format, uint32_t textureCount, bool enablePresentWait = false, uint32_t maxFrameLatency = 0) {
+            this->renderWindow = renderWindow;
+            this->format = format;
+            this->textureCount = textureCount;
+            this->enablePresentWait = enablePresentWait;
+            this->maxFrameLatency = maxFrameLatency;
+        }
+    };
+
     struct RenderInputSlot {
         uint32_t index = 0;
         uint32_t stride = 0;
@@ -1295,6 +1308,7 @@ namespace plume {
         bool alphaToCoverageEnabled = false;
         RenderPrimitiveTopology primitiveTopology = RenderPrimitiveTopology::TRIANGLE_LIST;
         RenderCullMode cullMode = RenderCullMode::NONE;
+        RenderFrontFace frontFace = RenderFrontFace::CLOCKWISE;
         RenderFormat renderTargetFormat[MaxRenderTargets] = {};
         RenderBlendDesc renderTargetBlend[MaxRenderTargets] = {};
         uint32_t renderTargetCount = 0;
@@ -1521,122 +1535,6 @@ namespace plume {
         RenderVertexBufferView(RenderBufferReference buffer, uint32_t size) {
             this->buffer = buffer;
             this->size = size;
-        }
-    };
-
-    struct RenderSRV {
-        RenderSRVType type = RenderSRVType::UNKNOWN;
-        RenderFormat format = RenderFormat::UNKNOWN;
-
-        union {
-            struct {
-                uint32_t firstElement;
-                uint32_t structureByteStride;
-                bool raw;
-            } buffer;
-
-            struct {
-                uint32_t mipLevels;
-            } texture;
-        };
-
-        RenderSRV() = default;
-
-        RenderSRV(RenderSRVType type, RenderFormat format) {
-            this->type = type;
-            this->format = format;
-        }
-
-        static RenderSRV Buffer(RenderFormat format, uint32_t firstElement = 0, bool raw = false) {
-            RenderSRV srv(RenderSRVType::BUFFER, format);
-            srv.buffer.firstElement = firstElement;
-            srv.buffer.structureByteStride = 0;
-            srv.buffer.raw = raw;
-            return srv;
-        }
-
-        static RenderSRV StructuredBuffer(uint32_t strideInBytes, uint32_t firstElement = 0, bool raw = false) {
-            RenderSRV srv(RenderSRVType::BUFFER, RenderFormat::UNKNOWN);
-            srv.buffer.firstElement = firstElement;
-            srv.buffer.structureByteStride = strideInBytes;
-            srv.buffer.raw = raw;
-            return srv;
-        }
-
-        static RenderSRV Texture1D(RenderFormat format = RenderFormat::UNKNOWN, uint32_t mipLevels = 1) {
-            RenderSRV srv(RenderSRVType::TEXTURE_1D, format);
-            srv.texture.mipLevels = mipLevels;
-            return srv;
-        }
-
-        static RenderSRV Texture2D(RenderFormat format = RenderFormat::UNKNOWN, uint32_t mipLevels = 1) {
-            RenderSRV srv(RenderSRVType::TEXTURE_2D, format);
-            srv.texture.mipLevels = mipLevels;
-            return srv;
-        }
-
-        static RenderSRV Texture3D(RenderFormat format = RenderFormat::UNKNOWN, uint32_t mipLevels = 1) {
-            RenderSRV srv(RenderSRVType::TEXTURE_3D, format);
-            srv.texture.mipLevels = mipLevels;
-            return srv;
-        }
-    };
-
-    struct RenderUAV {
-        RenderUAVType type = RenderUAVType::UNKNOWN;
-        RenderFormat format = RenderFormat::UNKNOWN;
-
-        union {
-            struct {
-                uint32_t firstElement;
-                uint32_t structureByteStride;
-                bool raw;
-            } buffer;
-
-            struct {
-                uint32_t mipSlice;
-            } texture;
-        };
-
-        RenderUAV() = default;
-
-        RenderUAV(RenderUAVType type, RenderFormat format) {
-            this->type = type;
-            this->format = format;
-        }
-
-        static RenderUAV Buffer(RenderFormat format, uint32_t firstElement = 0, bool raw = false) {
-            RenderUAV uav(RenderUAVType::BUFFER, format);
-            uav.buffer.firstElement = firstElement;
-            uav.buffer.structureByteStride = 0;
-            uav.buffer.raw = raw;
-            return uav;
-        }
-
-        static RenderUAV StructuredBuffer(uint32_t strideInBytes, uint32_t firstElement = 0, bool raw = false) {
-            RenderUAV uav(RenderUAVType::BUFFER, RenderFormat::UNKNOWN);
-            uav.buffer.firstElement = firstElement;
-            uav.buffer.structureByteStride = strideInBytes;
-            uav.buffer.raw = raw;
-            return uav;
-        }
-
-        static RenderUAV Texture1D(RenderFormat format = RenderFormat::UNKNOWN, uint32_t mipSlice = 0) {
-            RenderUAV uav(RenderUAVType::TEXTURE_1D, format);
-            uav.texture.mipSlice = mipSlice;
-            return uav;
-        }
-
-        static RenderUAV Texture2D(RenderFormat format = RenderFormat::UNKNOWN, uint32_t mipSlice = 0) {
-            RenderUAV uav(RenderUAVType::TEXTURE_2D, format);
-            uav.texture.mipSlice = mipSlice;
-            return uav;
-        }
-
-        static RenderUAV Texture3D(RenderFormat format = RenderFormat::UNKNOWN, uint32_t mipSlice = 0) {
-            RenderUAV uav(RenderUAVType::TEXTURE_3D, format);
-            uav.texture.mipSlice = mipSlice;
-            return uav;
         }
     };
 
@@ -1890,7 +1788,8 @@ namespace plume {
         // MSAA.
         bool sampleLocations = false;
 
-        // Resolve Modes.
+        // Resolve.
+        bool resolveRegion = false;
         bool resolveModes = false;
 
         // Bindless resources.
@@ -1899,6 +1798,9 @@ namespace plume {
 
         // Buffers.
         bool bufferDeviceAddress = false;
+        
+        // Samplers.
+        bool samplerMirrorClampToEdge = false;
 
         // Present.
         bool presentWait = false;
