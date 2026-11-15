@@ -13,7 +13,16 @@ string(COMPARE EQUAL ${CMAKE_SYSTEM_NAME} "Linux" IS_LINUX)
 include(CMakeDependentOption)
 cmake_dependent_option(SDL_VULKAN_ENABLED "Enable SDL Vulkan integration" OFF IS_LINUX OFF)
 cmake_dependent_option(D3D12_AGILITY_SDK_ENABLED "Enable D3D12 Agility SDK" OFF WIN32 OFF)
+option(PLUME_PLATFORM_SWITCH "Enable Nintendo Switch/libnx Vulkan integration" OFF)
+option(PLUME_SWITCH_OUNCEVK "Use the OunceVK static Vulkan library" OFF)
 option(PLUME_BUILD_EXAMPLES "Build example applications" OFF)
+
+if(PLUME_PLATFORM_SWITCH)
+    set(PLUME_SWITCH_DEVKITPRO "/opt/devkitpro" CACHE PATH "devkitPro root for Switch builds")
+    set(PLUME_SWITCH_NVK_ROOT "/opt/nvk-switch" CACHE PATH "Mesa/NVK Switch build or install root")
+    set(PLUME_SWITCH_NVK_LIBRARY "${PLUME_SWITCH_NVK_ROOT}/lib/libvulkan.a"
+        CACHE FILEPATH "Mesa/NVK Switch Vulkan static archive")
+endif()
 
 # Windows-specific definitions
 if(WIN32)
@@ -41,6 +50,7 @@ endif()
 message(STATUS "Plume - Building with backends: Vulkan=1 Metal=${APPLE} D3D12=${WIN32}")
 message(STATUS "Plume - SDL Vulkan integration: ${SDL_VULKAN_ENABLED}")
 message(STATUS "Plume - D3D12 Agility SDK: ${D3D12_AGILITY_SDK_ENABLED}")
+message(STATUS "Plume - Switch/libnx integration: ${PLUME_PLATFORM_SWITCH}")
 message(STATUS "Plume - Building examples: ${PLUME_BUILD_EXAMPLES}")
 
 # Basic source files that are always included
@@ -62,6 +72,23 @@ elseif(WIN32)
         plume_d3d12.cpp
         plume_d3d12.h
         ${CMAKE_CURRENT_SOURCE_DIR}/contrib/D3D12MemoryAllocator/src/D3D12MemAlloc.cpp
+    )
+endif()
+
+if(PLUME_PLATFORM_SWITCH)
+    set(PLUME_LSFG_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../lsfg-vk")
+    file(GLOB PLUME_LSFG_SOURCES CONFIGURE_DEPENDS
+        "${PLUME_LSFG_ROOT}/lsfg-vk-common/src/helpers/*.cpp"
+        "${PLUME_LSFG_ROOT}/lsfg-vk-common/src/vulkan/*.cpp"
+        "${PLUME_LSFG_ROOT}/lsfg-vk-backend/src/*.cpp"
+        "${PLUME_LSFG_ROOT}/lsfg-vk-backend/src/extraction/*.cpp"
+        "${PLUME_LSFG_ROOT}/lsfg-vk-backend/src/helpers/*.cpp"
+        "${PLUME_LSFG_ROOT}/lsfg-vk-backend/src/shaderchains/*.cpp"
+    )
+    list(APPEND PLUME_SOURCES
+        "${PLUME_LSFG_ROOT}/bridge/plume_lsfg_bridge.cpp"
+        "${PLUME_LSFG_ROOT}/bridge/plume_lsfg_bridge.h"
+        ${PLUME_LSFG_SOURCES}
     )
 endif()
 
@@ -91,6 +118,52 @@ if(D3D12_AGILITY_SDK_ENABLED)
     target_compile_definitions(plume PUBLIC D3D12_AGILITY_SDK_ENABLED)
     target_compile_definitions(plume PRIVATE D3D12MA_USING_DIRECTX_HEADERS)
     target_link_libraries(plume PRIVATE Microsoft::DirectX-Headers Microsoft::DirectX-Guids Microsoft::DirectX12-Agility)
+endif()
+
+if(PLUME_PLATFORM_SWITCH)
+    if(NOT EXISTS "${PLUME_SWITCH_NVK_LIBRARY}")
+        message(FATAL_ERROR "PLUME_SWITCH_NVK_LIBRARY does not exist: ${PLUME_SWITCH_NVK_LIBRARY}")
+    endif()
+    target_compile_definitions(plume PUBLIC
+        __SWITCH__
+        NX
+        VK_USE_PLATFORM_VI_NN
+    )
+    if(PLUME_SWITCH_OUNCEVK)
+        target_compile_definitions(plume PUBLIC PLUME_SWITCH_OUNCEVK)
+    endif()
+    target_include_directories(plume PUBLIC
+        "${PLUME_SWITCH_NVK_ROOT}/include"
+        "${PLUME_SWITCH_DEVKITPRO}/libnx/include"
+        "${PLUME_SWITCH_DEVKITPRO}/portlibs/switch/include"
+    )
+    target_include_directories(plume PRIVATE
+        "${PLUME_LSFG_ROOT}/bridge"
+        "${PLUME_LSFG_ROOT}/lsfg-vk-common/include"
+        "${PLUME_LSFG_ROOT}/lsfg-vk-backend/include"
+        "${PLUME_LSFG_ROOT}/lsfg-vk-backend/src"
+    )
+    target_compile_features(plume PUBLIC cxx_std_20)
+    set(PLUME_SWITCH_NVK_EXTRA_LIBRARIES "")
+    foreach(PLUME_SWITCH_LIBRARY_NAME IN ITEMS expat drm_nouveau)
+        foreach(PLUME_SWITCH_LIBRARY_DIR IN ITEMS "${PLUME_SWITCH_NVK_ROOT}/lib" "${PLUME_SWITCH_DEVKITPRO}/portlibs/switch/lib")
+            if(EXISTS "${PLUME_SWITCH_LIBRARY_DIR}/lib${PLUME_SWITCH_LIBRARY_NAME}.a")
+                list(APPEND PLUME_SWITCH_NVK_EXTRA_LIBRARIES "${PLUME_SWITCH_LIBRARY_DIR}/lib${PLUME_SWITCH_LIBRARY_NAME}.a")
+                break()
+            endif()
+        endforeach()
+    endforeach()
+    target_link_libraries(plume PUBLIC
+        "${PLUME_SWITCH_NVK_LIBRARY}"
+        $<$<NOT:$<BOOL:${PLUME_SWITCH_OUNCEVK}>>:-Wl,-u,vk_icdGetInstanceProcAddr>
+        $<$<NOT:$<BOOL:${PLUME_SWITCH_OUNCEVK}>>:-Wl,-u,vk_icdNegotiateLoaderICDInterfaceVersion>
+        "-Wl,--start-group"
+        ${PLUME_SWITCH_NVK_EXTRA_LIBRARIES}
+        zstd
+        z
+        nx
+        "-Wl,--end-group"
+    )
 endif()
 
 # Platform-specific includes

@@ -14,7 +14,12 @@
 #include <unordered_map>
 #include <unordered_set>
 
-#if defined(_WIN64)
+#if defined(__SWITCH__)
+#ifndef VK_USE_PLATFORM_VI_NN
+#define VK_USE_PLATFORM_VI_NN
+#endif
+#include <switch.h>
+#elif defined(_WIN64)
 #define VK_USE_PLATFORM_WIN32_KHR
 #elif defined(__ANDROID__)
 #define VK_USE_PLATFORM_ANDROID_KHR
@@ -28,7 +33,11 @@
 // For VK_KHR_portability_subset
 #define VK_ENABLE_BETA_EXTENSIONS
 
+#if defined(__SWITCH__) && defined(PLUME_SWITCH_OUNCEVK)
+#include <vulkan/vulkan.h>
+#else
 #include <volk.h>
+#endif
 
 #ifdef __clang__
 #pragma clang diagnostic push
@@ -41,7 +50,15 @@
 #pragma clang diagnostic pop
 #endif
 
+#if defined(__SWITCH__)
+struct LsfgNxRuntime;
+#endif
+
 namespace plume {
+#if defined(__SWITCH__)
+    void SetSwitchDriverMessageCallback(void (*callback)(const char *message));
+    void SetSwitchDeviceLostCallback(void (*callback)(const char *call));
+#endif
     struct VulkanCommandQueue;
     struct VulkanDevice;
     struct VulkanInterface;
@@ -56,6 +73,8 @@ namespace plume {
         VmaAllocationInfo allocationInfo = {};
         RenderBufferDesc desc;
         RenderBarrierStages barrierStages = RenderBarrierStage::NONE;
+        // Access declared by the last barrier (unknown at creation: assume it may have been written).
+        RenderBufferAccessBits barrierAccess = RenderBufferAccess::READ | RenderBufferAccess::WRITE;
 
         VulkanBuffer() = default;
         VulkanBuffer(VulkanDevice *device, VulkanPool *pool, const RenderBufferDesc &desc);
@@ -185,6 +204,7 @@ namespace plume {
     struct VulkanGraphicsPipeline : VulkanPipeline {
         VkPipeline vk = VK_NULL_HANDLE;
         VkRenderPass renderPass = VK_NULL_HANDLE;
+        bool dynamicDepthBias = false;
 
         VulkanGraphicsPipeline(VulkanDevice *device, const RenderGraphicsPipelineDesc &desc);
         ~VulkanGraphicsPipeline() override;
@@ -226,7 +246,7 @@ namespace plume {
         VulkanCommandQueue *commandQueue = nullptr;
         VkSurfaceKHR surface = VK_NULL_HANDLE;
         RenderWindow renderWindow = {};
-#if defined(__APPLE__)
+#if defined(__APPLE__) && !defined(__SWITCH__)
         std::unique_ptr<CocoaWindow> windowWrapper;
 #endif
         uint32_t textureCount = 0;
@@ -243,6 +263,11 @@ namespace plume {
         uint64_t currentPresentId = 0;
         bool immediatePresentModeSupported = false;
         uint32_t maxFrameLatency = 0;
+#if defined(__SWITCH__)
+        LsfgNxRuntime *frameGenerationRuntime = nullptr;
+        bool frameGenerationCompatible = false;
+        bool frameGenerationInitAttempted = false;
+#endif
 
         VulkanSwapChain(VulkanCommandQueue *commandQueue, RenderWindow renderWindow, uint32_t textureCount, RenderFormat format, uint32_t maxFrameLatency);
         ~VulkanSwapChain() override;
@@ -263,6 +288,9 @@ namespace plume {
         void getWindowSize(uint32_t &dstWidth, uint32_t &dstHeight) const;
         void releaseSwapChain();
         void releaseImageViews();
+#if defined(__SWITCH__)
+        void releaseFrameGeneration();
+#endif
     };
 
     struct VulkanFramebuffer : RenderFramebuffer {
@@ -305,6 +333,31 @@ namespace plume {
         const VulkanPipelineLayout *activeRaytracingPipelineLayout = nullptr;
         VkRenderPass activeRenderPass = VK_NULL_HANDLE;
 
+        // Redundant state filtering. Vulkan state lives until the command buffer is reset, so a
+        // bind that repeats what is already bound only costs driver time (on NVK, binding the same
+        // pipeline again re-copies and re-emits its whole state). Reset by begin().
+        static constexpr uint32_t MaxCachedVertexBuffers = 16;
+        VkPipeline boundGraphicsPipeline = VK_NULL_HANDLE;
+        VkPipeline boundComputePipeline = VK_NULL_HANDLE;
+        VkBuffer boundIndexBuffer = VK_NULL_HANDLE;
+        VkDeviceSize boundIndexOffset = 0;
+        VkIndexType boundIndexType = VK_INDEX_TYPE_MAX_ENUM;
+        bool indexBufferBound = false;
+        VkBuffer boundVertexBuffers[MaxCachedVertexBuffers] = {};
+        VkDeviceSize boundVertexOffsets[MaxCachedVertexBuffers] = {};
+        uint32_t boundVertexBufferMask = 0;
+        VkViewport boundViewport = {};
+        bool viewportBound = false;
+        VkRect2D boundScissor = {};
+        bool scissorBound = false;
+        float boundDepthBias[3] = {};
+        bool depthBiasBound = false;
+
+        // Scratch storage for the hot paths (instead of thread_local vectors, which cost a TLS
+        // lookup per access; a command list is only recorded by one thread at a time).
+        std::vector<VkBufferMemoryBarrier> scratchBufferBarriers;
+        std::vector<VkImageMemoryBarrier> scratchImageBarriers;
+
         VulkanCommandList(VulkanCommandQueue *queue);
         ~VulkanCommandList() override;
         void begin() override;
@@ -321,6 +374,7 @@ namespace plume {
         void setGraphicsPipelineLayout(const RenderPipelineLayout *pipelineLayout) override;
         void setGraphicsPushConstants(uint32_t rangeIndex, const void *data, uint32_t offset = 0, uint32_t size = 0) override;
         void setGraphicsDescriptorSet(RenderDescriptorSet *descriptorSet, uint32_t setIndex) override;
+        void setGraphicsDescriptorSetDynamic(RenderDescriptorSet *descriptorSet, uint32_t setIndex, const uint32_t *dynamicOffsets, uint32_t dynamicOffsetsCount) override;
         void setGraphicsRootDescriptor(RenderBufferReference bufferReference, uint32_t rootDescriptorIndex) override;
         void setRaytracingPipelineLayout(const RenderPipelineLayout *pipelineLayout) override;
         void setRaytracingPushConstants(uint32_t rangeIndex, const void *data, uint32_t offset = 0, uint32_t size = 0) override;
@@ -331,6 +385,7 @@ namespace plume {
         void setScissors(const RenderRect *scissorRects, uint32_t count) override;
         void setFramebuffer(const RenderFramebuffer *framebuffer) override;
         void setDepthBias(float depthBias, float depthBiasClamp, float slopeScaledDepthBias) override;
+        void setStencilReference(uint32_t reference) override;
         void clearColor(uint32_t attachmentIndex, RenderColor colorValue, const RenderRect *clearRects, uint32_t clearRectsCount) override;
         void clearDepthStencil(bool clearDepth, bool clearStencil, float depthValue, uint32_t stencilValue, const RenderRect *clearRects, uint32_t clearRectsCount) override;
         void copyBufferRegion(RenderBufferReference dstBuffer, RenderBufferReference srcBuffer, uint64_t size) override;
@@ -345,6 +400,7 @@ namespace plume {
         void resetQueryPool(const RenderQueryPool *queryPool, uint32_t queryFirstIndex, uint32_t queryCount) override;
         void writeTimestamp(const RenderQueryPool *queryPool, uint32_t queryIndex) override;
         void checkActiveRenderPass();
+        void resetStateCache();
         void endActiveRenderPass();
         void setDescriptorSet(VkPipelineBindPoint bindPoint, const VulkanPipelineLayout *pipelineLayout, const RenderDescriptorSet *descriptorSet, uint32_t setIndex);
     };
@@ -409,6 +465,11 @@ namespace plume {
         VulkanInterface *renderInterface = nullptr;
         VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
         VkPhysicalDeviceProperties physicalDeviceProperties = {};
+        VkPipelineCache pipelineCache = VK_NULL_HANDLE;
+        std::string pipelineCachePath;
+        uint64_t pipelineCacheKey = 0;
+        size_t pipelineCacheSavedSize = 0;
+        std::mutex pipelineCacheSaveMutex;
         VmaAllocator allocator = VK_NULL_HANDLE;
         uint32_t queueFamilyIndices[3] = {};
         std::vector<VulkanQueueFamily> queueFamilies;
@@ -419,6 +480,9 @@ namespace plume {
         std::unique_ptr<RenderBuffer> nullBuffer;
         bool loadStoreOpNoneSupported = false;
         bool nullDescriptorSupported = false;
+#if defined(__SWITCH__)
+        bool frameGenerationCapable = false;
+#endif
 
         VulkanDevice(VulkanInterface *renderInterface, const std::string &preferredDeviceName);
         ~VulkanDevice() override;
@@ -448,10 +512,15 @@ namespace plume {
         bool isValid() const;
         bool beginCapture() override;
         bool endCapture() override;
+        bool savePipelineCache() override;
+        void createPipelineCache();
     };
 
     struct VulkanInterface : RenderInterface {
         VkInstance instance = VK_NULL_HANDLE;
+#   if defined(__SWITCH__)
+        VkDebugUtilsMessengerEXT switchDebugMessenger = VK_NULL_HANDLE;
+#   endif
         VkApplicationInfo appInfo = {};
         RenderInterfaceCapabilities capabilities;
         std::vector<std::string> deviceNames;

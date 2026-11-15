@@ -15,7 +15,9 @@
 #include <cfloat>
 #include <cstdint>
 
-#if defined(_WIN64)
+#if defined(__SWITCH__)
+#include <switch.h>
+#elif defined(_WIN64)
 #include <Windows.h>
 #elif defined(__ANDROID__)
 #include "android/native_window.h"
@@ -34,7 +36,10 @@
 #endif
 
 namespace plume {
-#if defined(_WIN64)
+#if defined(__SWITCH__)
+    // Native libnx window used by VK_NN_vi_surface.
+    typedef NWindow* RenderWindow;
+#elif defined(_WIN64)
     // Native HWND handle to the target window.
     typedef HWND RenderWindow;
 #elif defined(__ANDROID__)
@@ -160,6 +165,8 @@ namespace plume {
         BC7_TYPELESS,
         BC7_UNORM,
         BC7_UNORM_SRGB,
+        // Stencil only, 8 bits (Vulkan; UnleashedRecomp's Switch renderer uses it as a coverage mask).
+        S8_UINT,
         MAX
     };
 
@@ -355,7 +362,10 @@ namespace plume {
         READ_WRITE_STRUCTURED_BUFFER,
         BYTE_ADDRESS_BUFFER,
         READ_WRITE_BYTE_ADDRESS_BUFFER,
-        ACCELERATION_STRUCTURE
+        ACCELERATION_STRUCTURE,
+        // Vulkan only: VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC. Bind the set with
+        // RenderCommandList::setGraphicsDescriptorSetDynamic().
+        CONSTANT_BUFFER_DYNAMIC
     };
 
     enum class RenderRootDescriptorType {
@@ -579,6 +589,7 @@ namespace plume {
         case RenderFormat::R8_UINT:
         case RenderFormat::R8_SNORM:
         case RenderFormat::R8_SINT:
+        case RenderFormat::S8_UINT:
             return 1;
         case RenderFormat::BC1_UNORM:
         case RenderFormat::BC1_UNORM_SRGB:
@@ -661,6 +672,7 @@ namespace plume {
         case RenderFormat::R8_UINT:
         case RenderFormat::R8_SNORM:
         case RenderFormat::R8_SINT:
+        case RenderFormat::S8_UINT:
             return 1;
         case RenderFormat::BC1_TYPELESS:
         case RenderFormat::BC1_UNORM:
@@ -702,7 +714,7 @@ namespace plume {
     }
 
     constexpr bool RenderFormatIsStencil(RenderFormat format) {
-        return format == RenderFormat::D32_FLOAT_S8_UINT;
+        return format == RenderFormat::D32_FLOAT_S8_UINT || format == RenderFormat::S8_UINT;
     }
 
     constexpr RenderTextureViewDimension RenderTextureDimensionToView(const RenderTextureDimension dimension) {
@@ -1269,6 +1281,8 @@ namespace plume {
         float depthBiasClamp = 0.0f;
         float slopeScaledDepthBias = 0.0f;
         bool dynamicDepthBiasEnabled = false;
+        // The stencil reference comes from RenderCommandList::setStencilReference (Vulkan).
+        bool dynamicStencilReferenceEnabled = false;
         bool depthEnabled = false;
         bool depthWriteEnabled = false;
         bool stencilEnabled = false;
